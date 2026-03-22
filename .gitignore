@@ -1,0 +1,17 @@
+# HDF5 simulation output
+*.h5
+*.hdf5
+data/
+output/
+
+# Julia artefacts
+Manifest.toml
+*.jl.cov
+*.jl.mem
+.julia/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
