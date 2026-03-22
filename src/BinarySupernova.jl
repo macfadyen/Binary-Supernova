@@ -172,6 +172,13 @@ export nbody_step!
 export add_sink_sources!, accrete!
 
 # ---------------------------------------------------------------------------
+# Phase 4: Stellar polytrope initial conditions.
+
+include("stellar_ic.jl")
+
+export lane_emden, polytrope_ic_3d!
+
+# ---------------------------------------------------------------------------
 # SimParams — all physics parameters for a run.
 
 """
