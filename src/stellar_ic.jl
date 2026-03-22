@@ -146,3 +146,62 @@ function polytrope_ic_3d!(U,
 
     return ρ_c, r_scale, K
 end
+
+# ---------------------------------------------------------------------------
+# Supernova thermal bomb (Phase 5)
+
+"""
+    thermal_bomb!(U, nx, ny, nz, dx, dy, dz;
+                  E_SN, r_bomb,
+                  x0=0, y0=0, z0=0,
+                  x_center=0, y_center=0, z_center=0) -> M_bomb
+
+Deposit supernova energy `E_SN` as thermal energy, mass-weighted over all
+active cells within radius `r_bomb` of (`x_center`, `y_center`, `z_center`):
+
+```
+ΔE[cell] = E_SN × (ρ[cell] dV) / M_bomb
+```
+
+where M_bomb = ∫_{r<r_bomb} ρ dV.  The sum of all ΔE equals E_SN exactly
+(up to floating-point rounding).
+
+Returns M_bomb (total gas mass inside the bomb sphere).
+"""
+function thermal_bomb!(U,
+                        nx::Int, ny::Int, nz::Int,
+                        dx::Real, dy::Real, dz::Real;
+                        E_SN     ::Real,
+                        r_bomb   ::Real,
+                        x0       ::Real = 0.0,
+                        y0       ::Real = 0.0,
+                        z0       ::Real = 0.0,
+                        x_center ::Real = 0.0,
+                        y_center ::Real = 0.0,
+                        z_center ::Real = 0.0)
+    ng = NG
+    dV = Float64(dx) * Float64(dy) * Float64(dz)
+
+    # First pass: total gas mass inside r_bomb
+    M_bomb = 0.0
+    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        xc = x0 + (i - ng - 0.5) * dx - x_center
+        yc = y0 + (j - ng - 0.5) * dy - y_center
+        zc = z0 + (k - ng - 0.5) * dz - z_center
+        sqrt(xc^2 + yc^2 + zc^2) < r_bomb && (M_bomb += U[1, i, j, k] * dV)
+    end
+    M_bomb > 0.0 || error("thermal_bomb!: no gas within r_bomb = $r_bomb")
+
+    # Second pass: deposit energy proportional to local mass density.
+    # ΔU[5] = (E_SN / M_bomb) * ρ  is an energy density [code units / volume].
+    # Total energy deposited: Σ ΔU[5] * dV = (E_SN / M_bomb) * M_bomb = E_SN exactly.
+    fac = Float64(E_SN) / M_bomb
+    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        xc = x0 + (i - ng - 0.5) * dx - x_center
+        yc = y0 + (j - ng - 0.5) * dy - y_center
+        zc = z0 + (k - ng - 0.5) * dz - z_center
+        sqrt(xc^2 + yc^2 + zc^2) < r_bomb && (U[5, i, j, k] += fac * U[1, i, j, k])
+    end
+
+    return M_bomb
+end

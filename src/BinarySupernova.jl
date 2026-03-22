@@ -176,7 +176,7 @@ export add_sink_sources!, accrete!
 
 include("stellar_ic.jl")
 
-export lane_emden, polytrope_ic_3d!
+export lane_emden, polytrope_ic_3d!, thermal_bomb!
 
 # ---------------------------------------------------------------------------
 # SimParams — all physics parameters for a run.
