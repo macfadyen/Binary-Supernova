@@ -193,6 +193,13 @@ include("stellar_ic.jl")
 export lane_emden, polytrope_ic_3d!, thermal_bomb!
 
 # ---------------------------------------------------------------------------
+# Phase 9: Roche potential relaxation initial conditions.
+
+include("relax_ic.jl")
+
+export relax_ic!, relax_damping_source!
+
+# ---------------------------------------------------------------------------
 # Phase 7: Gas self-gravity (FFT Poisson solver, isolated BCs).
 
 include("self_gravity.jl")
