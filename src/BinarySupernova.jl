@@ -21,10 +21,18 @@ include("hllc.jl")
 include("euler3d.jl")
 
 export hllc_flux_x, hllc_flux_y, hllc_flux_z
-export euler3d_step!, cfl_dt_3d
+export euler3d_step!, euler3d_rhs!, cfl_dt_3d
 export fill_ghost_3d_outflow!, fill_ghost_3d_periodic!
 export apply_floors_3d!
 export sedov_ic_3d!
+
+# ---------------------------------------------------------------------------
+# Phase 2: 3D Fixed Mesh Refinement (4:1 ratio).
+
+include("fmr3d.jl")
+
+export FMRLevel3D, FMRGrid3D, FluxReg3D
+export fmr3d_step!, cfl_dt_fmr3d
 
 # ---------------------------------------------------------------------------
 # Physical constants (CGS)

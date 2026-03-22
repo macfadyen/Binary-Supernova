@@ -284,6 +284,44 @@ function cfl_dt_3d(U, nx::Int, ny::Int, nz::Int,
 end
 
 # ---------------------------------------------------------------------------
+# RHS function (method of lines operator) — used by euler3d_step! and fmr3d.
+
+"""
+    euler3d_rhs!(dU, Fx, Fy, Fz, U, nx, ny, nz, dx, dy, dz, γ;
+                 bc=:outflow, ρ_floor=0.0, P_floor=0.0, fill_ghosts=true)
+
+Compute the method-of-lines RHS: dU = L(U) = −∂F/∂x − ∂G/∂y − ∂H/∂z.
+Fills `Fx`, `Fy`, `Fz` (WENO5+HLLC fluxes) and `dU` (flux divergence).
+When `fill_ghosts=false`, skips the BC ghost fill (caller is responsible).
+Used by `euler3d_step!` and by `fmr3d_step!` (which manages fine ghost fill
+separately via prolongation from the coarse level).
+"""
+function euler3d_rhs!(dU, Fx, Fy, Fz, U,
+                      nx::Int, ny::Int, nz::Int,
+                      dx::Real, dy::Real, dz::Real, γ::Real;
+                      bc::Symbol     = :outflow,
+                      ρ_floor::Real  = 0.0,
+                      P_floor::Real  = 0.0,
+                      fill_ghosts::Bool = true)
+    if fill_ghosts
+        if bc === :periodic
+            fill_ghost_3d_periodic!(U, nx, ny, nz)
+        else
+            fill_ghost_3d_outflow!(U, nx, ny, nz)
+        end
+    end
+    apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
+    fill!(Fx, zero(eltype(U)))
+    fill!(Fy, zero(eltype(U)))
+    fill!(Fz, zero(eltype(U)))
+    _weno_fluxes_x!(Fx, U, nx, ny, nz, γ)
+    _weno_fluxes_y!(Fy, U, nx, ny, nz, γ)
+    _weno_fluxes_z!(Fz, U, nx, ny, nz, γ)
+    _flux_divergence_3d!(dU, Fx, Fy, Fz, nx, ny, nz, dx, dy, dz)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Main step function
 
 """
@@ -305,51 +343,32 @@ function euler3d_step!(U, nx::Int, ny::Int, nz::Int,
     nytot = ny + 2*ng
     nztot = nz + 2*ng
 
-    # Pre-allocate scratch (avoid allocations inside L!).
     Fx = zeros(eltype(U), 5, nxtot+1, nytot,   nztot  )
     Fy = zeros(eltype(U), 5, nxtot,   nytot+1, nztot  )
     Fz = zeros(eltype(U), 5, nxtot,   nytot,   nztot+1)
     dU = zeros(eltype(U), 5, nxtot,   nytot,   nztot  )
 
-    fill_bc! = bc === :periodic ?
-        (V -> fill_ghost_3d_periodic!(V, nx, ny, nz)) :
-        (V -> fill_ghost_3d_outflow!( V, nx, ny, nz))
+    Un = copy(U)
 
-    function L!(dV, V)
-        fill_bc!(V)
-        apply_floors_3d!(V, nx, ny, nz, ρ_floor, P_floor, γ)
-        fill!(Fx, zero(eltype(U)))
-        fill!(Fy, zero(eltype(U)))
-        fill!(Fz, zero(eltype(U)))
-        _weno_fluxes_x!(Fx, V, nx, ny, nz, γ)
-        _weno_fluxes_y!(Fy, V, nx, ny, nz, γ)
-        _weno_fluxes_z!(Fz, V, nx, ny, nz, γ)
-        _flux_divergence_3d!(dV, Fx, Fy, Fz, nx, ny, nz, dx, dy, dz)
-    end
-
-    tmp1 = similar(U)
-    Un   = similar(U)
-    Un  .= U
-
-    # SSP-RK3 (Shu-Osher) with explicit positivity floors after each stage
-    # combination.  apply_floors_3d! is also called at the *start* of L!, but
-    # the stage combinations U = ... can introduce ρ < 0 between L! calls.
-    # Flooring after each combination prevents WENO5 from seeing unphysical
-    # states (near-zero ρ with large momentum → enormous velocity spikes).
+    # SSP-RK3 (Shu-Osher).  Floors after each stage combination prevent
+    # WENO5 from seeing ρ < 0 between calls.
 
     # Stage 1: u⁽¹⁾ = uⁿ + dt L(uⁿ)
-    L!(tmp1, U)
-    @. U = Un + dt * tmp1
+    euler3d_rhs!(dU, Fx, Fy, Fz, U, nx, ny, nz, dx, dy, dz, γ;
+                 bc, ρ_floor, P_floor)
+    @. U = Un + dt * dU
     apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
     # Stage 2: u⁽²⁾ = ¾ uⁿ + ¼ u⁽¹⁾ + ¼ dt L(u⁽¹⁾)
-    L!(tmp1, U)
-    @. U = 0.75 * Un + 0.25 * U + 0.25 * dt * tmp1
+    euler3d_rhs!(dU, Fx, Fy, Fz, U, nx, ny, nz, dx, dy, dz, γ;
+                 bc, ρ_floor, P_floor)
+    @. U = 0.75 * Un + 0.25 * U + 0.25 * dt * dU
     apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
     # Stage 3: uⁿ⁺¹ = ⅓ uⁿ + ⅔ u⁽²⁾ + ⅔ dt L(u⁽²⁾)
-    L!(tmp1, U)
-    @. U = (1/3) * Un + (2/3) * U + (2/3) * dt * tmp1
+    euler3d_rhs!(dU, Fx, Fy, Fz, U, nx, ny, nz, dx, dy, dz, γ;
+                 bc, ρ_floor, P_floor)
+    @. U = (1/3) * Un + (2/3) * U + (2/3) * dt * dU
     apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
     return nothing
