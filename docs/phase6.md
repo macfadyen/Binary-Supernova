@@ -56,13 +56,25 @@ All diagnostics tests use small grids (8³) for speed.
 
 | Test | Result | Pass? |
 |------|--------|-------|
-| Gas energy = Σ U₅ dV | exact to 1e-14 | ✅ |
-| Gas momentum = 0 for symmetric IC | \|P\| < 1e-14 | ✅ |
-| BH kinetic energy (analytic) | 0.125 (exact) | ✅ |
-| BH angular momentum Lz (analytic) | 0.25 (exact) | ✅ |
-| Bound mass fraction (deep potential) | 1.00 (all bound) | ✅ |
-| Snapshot round-trip | data exact after HDF5 serialisation | ✅ |
-| Trajectory round-trip | 5 dumps, 2 BHs, data exact | ✅ |
+| Gas energy = Σ U₅ dV | exact to 1e-14 | Yes |
+| Gas momentum = 0 for symmetric IC | \|P\| < 1e-14 | Yes |
+| BH kinetic energy (analytic) | 0.125 (exact) | Yes |
+| BH angular momentum Lz (analytic) | 0.25 (exact) | Yes |
+| Bound mass fraction (deep potential) | 1.00 (all bound) | Yes |
+| Snapshot round-trip | data exact after HDF5 serialisation | Yes |
+| Trajectory round-trip | 5 dumps, 2 BHs, data exact | Yes |
+
+![Diagnostics summary: energy, BH KE, BH Lz, bound mass fraction](figures/phase6_diagnostics.png)
+
+The figure shows four bar chart panels. From left to right:
+(1) Gas energy diagnostic: computed value versus analytical reference (Σ U₅ dV = 2 × 8³ × 0.1³ = 0.128), agreeing to machine precision.
+(2) BH kinetic energy: computed value 0.125 against the expected value (red dashed), which is 2 × ½ × 0.5 × 0.5² = 0.125.
+(3) BH angular momentum Lz: computed value 0.25 against the expected value (red dashed), which is 2 × 0.5 × 0.5 × 0.5 = 0.25.
+(4) Bound mass fraction: all 8³ cells are classified as bound (fraction = 1.0) under a BH of mass 10 at the origin, since |Φ_BH| ≫ e_thermal at all grid locations.
+
+![Snapshot round-trip: density slice before and after HDF5 serialisation](figures/phase6_snapshot.png)
+
+The two panels show the same structured Gaussian density field at z=0 before writing (left) and after reading back from HDF5 (right). The two panels are visually identical. The label below confirms the maximum absolute difference is 0.0, i.e. the round-trip is exact to machine precision as expected since HDF5 stores float64 values without lossy compression.
 
 ---
 

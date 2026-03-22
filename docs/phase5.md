@@ -60,9 +60,11 @@ Uniform background ρ = 1, E_SN = 1, r_bomb = 0.2 (16³ grid).
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| \|ΔE_total − E_SN\| / E_SN | **0.0%** | < 10⁻¹⁰ | ✅ |
+| \|ΔE_total − E_SN\| / E_SN | **0.0%** | < 10⁻¹⁰ | Yes |
 
 Total energy deposited is exactly `E_SN` by construction.
+
+---
 
 ### Sedov-Taylor blast wave from thermal bomb
 
@@ -71,11 +73,17 @@ Same setup as Phase 1 Sedov test but energy injected via `thermal_bomb!`.
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| Shock position error \|R_num − R_exact\| / R_exact | **3.4%** | < 5% | ✅ |
+| Shock position error \|R_num − R_exact\| / R_exact | **3.4%** | < 5% | Yes |
 
 R_exact = 0.4584 (α_sedov = 0.4942, γ = 5/3), R_num = 0.4428.
 The 3.4% error is consistent with the Phase 1 Sedov test (2.9%) and reflects
 the finite-volume discretisation at 32³ resolution.
+
+![Sedov from thermal bomb: radial density profile at t=0.1](figures/phase5_sedov_bomb.png)
+
+The figure shows the radial density profile at t=0.1 (all 32³ cells scattered in blue). The dotted black line marks the background density ρ_bg=1. The red vertical line marks the analytic Sedov shock position R_exact=0.458; the orange dashed line marks the numerically identified shock position R_num=0.443 (located at the cell of maximum pressure). The compressed shell of gas is clearly visible between background and post-shock densities.
+
+---
 
 ### BH2 fallback accretion
 
@@ -84,10 +92,16 @@ Evolved for 5 steps using first-order-in-time Euler with sink sources.
 
 | Metric | Value | Pass? |
 |--------|-------|-------|
-| M_BH2 > M_BH2_init | 0.22726 > 0.2 | ✅ |
+| M_BH2 > M_BH2_init | 0.22726 > 0.2 | Yes |
 
 BH2 accretes ~13.6% of its initial mass in 5 steps, confirming the sink
 prescription couples correctly to the thermal bomb ejecta.
+
+![BH2 fallback mass growth over 5 timesteps](figures/phase5_bh2_accretion.png)
+
+The figure shows M_BH2(t) (blue dots and line) over the 5 explicit timesteps. The dashed grey line marks the initial mass M_BH2_init = 0.2. The mass grows monotonically, confirming that the torque-free sink correctly transfers mass from the polytrope gas to BH2. The growth rate is fast because the sink radius encompasses several cells of the dense polytrope core at this resolution (16³, R_star/dx ≈ 5 cells).
+
+---
 
 ### Energy budget
 
@@ -95,7 +109,7 @@ prescription couples correctly to the thermal bomb ejecta.
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| \|E_loss\| = \|(E₀ − E₁) / E₀\| | **≈ 0%** | < 15% | ✅ |
+| \|E_loss\| = \|(E₀ − E₁) / E₀\| | **≈ 0%** | < 15% | Yes |
 
 Energy is conserved to numerical precision at early times; outflow BC losses
 become significant only after the shock approaches the domain boundary.

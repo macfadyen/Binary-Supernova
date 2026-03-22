@@ -103,12 +103,20 @@ conservation (CLAUDE.md §4.3).
 
 **Setup**: two equal-mass BHs (M₁ = M₂ = 0.5) in a circular orbit,
 separation a₀ = 1, G = 1, ε = 10⁻⁴, no gas.  Orbital period T = 2π.
-Integration: SSP-RK3, dt = T/500 = 2π/500, 10 orbits (t_end = 20π).
+Integration: SSP-RK3, dt = T/500 = 2π/500, 10 orbits (t_end = 20π ≈ 62.83).
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| Relative energy error \|ΔE/E₀\| | **0.0073%** | < 0.1% | ✅ |
-| Relative angular-momentum error \|ΔL/L₀\| | **0.0036%** | < 0.1% | ✅ |
+| Relative energy error \|ΔE/E₀\| | **0.0073%** | < 0.1% | Yes |
+| Relative angular-momentum error \|ΔL/L₀\| | **0.0036%** | < 0.1% | Yes |
+
+Both conservation quantities remain well below 0.1% over 10 full orbital periods, confirming that the SSP-RK3 N-body integrator has negligible secular drift at dt = T/500.
+
+![Kepler orbit: trajectories and conservation errors](figures/phase3_kepler_orbit.png)
+
+The left panel shows the BH1 (blue) and BH2 (red) trajectories in the x-y plane over 10 orbits. The circular orbits remain closed to visual precision. The right panel shows the relative energy error |ΔE/E₀| (solid blue) and angular momentum error |ΔL/L₀| (dashed red) on a log scale versus time. Both remain below 10⁻⁴ (0.01%) throughout, well inside the 0.1% threshold (dotted grey line). Faint vertical lines mark successive orbital periods.
+
+---
 
 ### Sink — mass accounting
 
@@ -118,7 +126,7 @@ floating-point precision (difference < 10⁻¹⁴).
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| \|dm_gas_rate − dm_BH_rate\| / dm_BH_rate | **0.0%** | < 10⁻¹² | ✅ |
+| \|dm_gas_rate − dm_BH_rate\| / dm_BH_rate | **0.0%** | < 10⁻¹² | Yes |
 
 ### Sink — torque-free angular-momentum drain
 
@@ -127,7 +135,7 @@ Gas in solid-body rotation (ω = 1) around a stationary BH.  Maximum torque
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| max \|r × d(ρv)/dt\| | **2.8 × 10⁻¹⁷** | < 10⁻¹⁴ | ✅ |
+| max \|r × d(ρv)/dt\| | **2.8 × 10⁻¹⁷** | < 10⁻¹⁴ | Yes |
 
 The residual is at floating-point rounding level (≈ machine epsilon × |ρ v_r / t_sink|),
 confirming that the torque is algebraically zero.
@@ -140,7 +148,7 @@ matches the expected value `M_gas_inside_sink / t_sink * dt` to relative error
 
 | Metric | Result | Threshold | Pass? |
 |--------|--------|-----------|-------|
-| \|ΔM_BH − expected\| / expected | **< 10⁻¹³** | < 10⁻¹⁰ | ✅ |
+| \|ΔM_BH − expected\| / expected | **< 10⁻¹³** | < 10⁻¹⁰ | Yes |
 
 ---
 

@@ -46,26 +46,29 @@ Ghost cells are filled face-by-face (x faces → y faces (active x) → z faces 
 ### FMR 4:1 — Sedov blast crossing C-F boundary
 
 **Grid setup**
-| Level | Cells | Domain | dx |
+
+| Level | Cells | Domain | Δx |
 |-------|-------|--------|----|
 | Coarse | 8³ | [−0.5, 0.5]³ | 1/8 |
 | Fine   | 16³ | [−0.25, 0.25]³ | 1/32 |
 | Reference | 32³ | [−0.5, 0.5]³ | 1/32 |
 
-**Parameters**: γ = 5/3, E_blast = 1, ρ_bg = 1, r_inject = 0.15, P_floor = 1e-5, CFL = 0.4, t_end = 0.01
+**Parameters**: γ = 5/3, E_blast = 1, ρ_bg = 1, r_inject = 0.15, P_floor = 1e-5, CFL = 0.4, t_end = 0.01.
 
 At t = 0.01 the Sedov shock radius ≈ 0.18, inside the fine patch half-width of 0.25, so the C-F ghost cells see only the ambient background during the run.
 
-**Results**
-
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| L1 density error (fine region vs 32³ reference) | **0.44%** | < 5% | ✅ |
-| Energy conservation | **0.0%** | < 15% | ✅ |
-| NaN / Inf in coarse array | none | — | ✅ |
-| NaN / Inf in fine array | none | — | ✅ |
+| L1 density error (fine region vs 32³ reference) | **0.44%** | < 5% | Yes |
+| Energy conservation | **0.0%** | < 15% | Yes |
+| NaN / Inf in coarse array | none | — | Yes |
+| NaN / Inf in fine array | none | — | Yes |
 
 The L1 error of 0.44% is dominated by the difference in boundary conditions (coarse-prolongated ghost fill in FMR vs outflow BC in the reference) and verifies that the flux correction and prolongation introduce no spurious errors.
+
+![FMR density comparison: fine region vs reference, and density error](figures/phase2_fmr_density.png)
+
+The left panel shows the x-axis density profile at t=0.01: the 16-point FMR fine level (blue dots) is overlaid on the 32-point uniform reference (black line). The shaded blue region marks the fine patch extent [−0.25, 0.25]. Dashed grey lines indicate the coarse-fine boundaries. The right panel shows the absolute density error |ρ_FMR − ρ_ref| on a log scale, confirming that errors are concentrated near the shock and are everywhere below 5% of the reference peak density.
 
 ---
 

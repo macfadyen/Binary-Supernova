@@ -64,12 +64,12 @@ potential, with first-order one-sided differences at domain edges.
 All tests use a uniform sphere of radius R = 0.15 centred at (0.5, 0.5, 0.5)
 on the unit cube [0, 1]³.
 
-| Test | Result | Pass? |
-|------|--------|-------|
-| Exterior potential 1/r scaling (N=32) | ratio error 0.49% < 1% | ✅ |
-| Self-energy E = −3M²/(5R) | 8.1% error < 10% | ✅ |
-| Convergence N=16 → N=32 (ratio error 3.5% → 0.5%) | error decreases; err(N=32) < 1% | ✅ |
-| Net force on symmetric distribution = 0 | |F| < 10⁻¹⁷ (machine ε) | ✅ |
+| Test | Result | Threshold | Pass? |
+|------|--------|-----------|-------|
+| Exterior potential 1/r scaling (N=32) | ratio error **0.49%** | < 1% | Yes |
+| Self-energy E = −3M²/(5R) | **8.1%** error | < 10% | Yes |
+| Convergence N=16 → N=32 (ratio error 3.5% → 0.5%) | error decreases; err(N=32) < 1% | < 1% at N=32 | Yes |
+| Net force on symmetric distribution = 0 | \|F\| < 10⁻¹⁷ (machine ε) | < machine ε | Yes |
 
 The 1/r scaling test verifies that the exterior potential of the discrete sphere
 falls off as the reciprocal of distance to within 0.5%.  The self-energy
@@ -78,6 +78,10 @@ slightly smaller effective radius than R (cells near the surface contribute only
 partially).  The net-force test confirms Newton's third law is satisfied to
 machine precision by construction (the source term is anti-symmetric in cell
 pairs).
+
+![Poisson solver: potential profile and convergence](figures/phase7_poisson.png)
+
+The left panel shows Φ(x, 0.5, 0.5) along the x-axis for the N=32 uniform sphere test. The blue curve is the numerical FFT potential; the dashed black curve is the analytic exterior potential −M/r for x outside the sphere (grey dotted vertical lines). Inside the sphere (r < R = 0.15 from centre) the potential flattens as expected for a uniform sphere; outside, the numerical curve follows −M/r closely. The right panel shows the convergence of the 1/r ratio error versus grid resolution N = 8, 16, 32, 64 on log-log axes. The error decreases from 10% at N=8 to 0.2% at N=64, with roughly second-order convergence at high resolution. The 1% threshold (grey dashed) is met at N=32.
 
 ---
 

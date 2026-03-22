@@ -82,7 +82,13 @@ Chandrasekhar (1939) reference values:
 | 1.5  | 3.65400       | 3.65375   | 0.0068% |
 | 3.0  | 6.89700       | 6.89685   | 0.0022% |
 
-All < 0.1% threshold. ✅
+All < 0.1% threshold. Pass.
+
+![Lane-Emden solutions for n=1, 1.5, 3](figures/phase4_lane_emden.png)
+
+The figure shows θ(ξ) for n=1 (blue), n=1.5 (red), and n=3 (green). Open circles mark the first zero ξ₁ for each polytrope index. The n=3 solution (relevant for the radiation-dominated stellar interior, γ=4/3) has the largest ξ₁ ≈ 6.90 and the most centrally concentrated density profile.
+
+---
 
 ### 3D mass integral (32³, γ = 5/3)
 
@@ -91,7 +97,7 @@ All < 0.1% threshold. ✅
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| \|M_grid − M_star\| / M_star | **0.001%** | < 2% | ✅ |
+| \|M_grid − M_star\| / M_star | **0.001%** | < 2% | Yes |
 
 ### Pressure profile P = K ρ^γ
 
@@ -99,7 +105,7 @@ At all 7208 interior cells (ρ > 10 ρ_floor):
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| max \|(P_grid − K ρ^γ) / (K ρ^γ)\| | **1.6 × 10⁻¹⁶** | < 10⁻¹⁰ | ✅ |
+| max \|(P_grid − K ρ^γ) / (K ρ^γ)\| | **1.6 × 10⁻¹⁶** | < 10⁻¹⁰ | Yes |
 
 Exact to floating-point precision — both P and ρ are set from the same
 interpolated θ value.
@@ -111,8 +117,8 @@ The star begins to expand (no self-gravity), but the solver remains stable.
 
 | Metric | Result | Pass? |
 |--------|--------|-------|
-| NaN in U | none | ✅ |
-| Inf in U | none | ✅ |
+| NaN in U | none | Yes |
+| Inf in U | none | Yes |
 
 ### BH1 Keplerian IC
 
@@ -120,10 +126,14 @@ M_BH1 = 0.3, M_star = 0.7, a₀ = 1, softening ε = 0.05.
 
 | Metric | Value | Threshold | Pass? |
 |--------|-------|-----------|-------|
-| \| \|a_BH1\| − a_centripetal \| / a_centripetal | **0.37%** | < 1% | ✅ |
+| \| \|a_BH1\| − a_centripetal \| / a_centripetal | **0.37%** | < 1% | Yes |
 
 The 0.37% difference is from Plummer softening (ε = 0.05 ≠ 0); a point-mass
 orbit with softening is not exactly circular.
+
+![Polytrope IC: radial density profile on 32³ grid](figures/phase4_polytrope.png)
+
+The figure shows ρ/ρ_c versus r/R_star. Blue dots are individual grid cells (all 32³ = 32768 cells); the black curve is the analytic Lane-Emden θⁿ profile for n=1.5 (γ=5/3). The cells follow the analytic profile closely inside R_star (dashed vertical grey line at r/R_star = 1) and drop to the floor value outside. The small spread at any given radius is due to the discretisation of a spherical surface on a Cartesian grid.
 
 ---
 

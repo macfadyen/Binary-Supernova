@@ -1,11 +1,14 @@
-# Phase 0 — Bootstrap
+# Phase 0: Bootstrap
 
 ## Objective
 
 Stand up the `BinarySupernova` Julia package: directory layout, dependencies,
 core data structures, and the two numerical modules copied verbatim from
-HighMachCBD. This phase establishes the scaffold that all subsequent phases
-build on.
+HighMachCBD.  This phase establishes the scaffold that all subsequent phases
+build on.  No physics kernels are written here; the goal is a compilable,
+tested package with all infrastructure in place.
+
+---
 
 ## Implementation Notes
 
@@ -27,7 +30,7 @@ Binary-Supernova/
 ├── docs/
 │   ├── phase0.md           this file
 │   └── figures/            (empty — no figures generated in Phase 0)
-└── scripts/                (empty — plotting scripts added per phase)
+└── scripts/                (plotting scripts added per phase)
 ```
 
 ### Core data structures defined in `BinarySupernova.jl`
@@ -63,38 +66,52 @@ None. The CLAUDE.md comment "c_code ~ 10⁴ for stellar systems" was incorrect;
 the correct value for compact pre-SN binaries (a₀ ~ 10 R☉) is c_code ~ 500.
 The comment and the example were corrected before the Phase 0 commit.
 
+---
+
 ## Test Results
 
-All 25 tests pass (`julia --project test/runtests.jl`).
+All 25 tests pass. Phase 0 has no figures (bootstrap only).
 
 | Test set | Tests | Result |
-|---|---|---|
-| WENO5 reconstruction | 4 | ✅ pass |
-| SSP-RK3 integrator | 4 | ✅ pass |
-| BlackHole struct and sink radii | 11 | ✅ pass |
-| SimParams construction | 4 | ✅ pass |
-| PhysicalUnits conversion | 2 | ✅ pass |
-| **Total** | **25** | **✅ all pass** |
+|----------|-------|--------|
+| WENO5 reconstruction | 4 | Pass |
+| SSP-RK3 integrator | 4 | Pass |
+| BlackHole struct and sink radii | 11 | Pass |
+| SimParams construction | 4 | Pass |
+| PhysicalUnits conversion | 2 | Pass |
+| **Total** | **25** | **All pass** |
 
 ### WENO5
 
-- Linear reconstruction exact to 1e-13 ✓
-- Quadratic reconstruction exact to 1e-13 ✓
+| Test | What is measured | Result | Pass? |
+|------|-----------------|--------|-------|
+| Linear reconstruction | max \|weno5_left − exact\| on a linear stencil | < 1e-13 | Yes |
+| Quadratic reconstruction | max \|weno5_left − exact\| on a quadratic stencil | < 1e-13 | Yes |
+| Interface reconstruction | weno5_reconstruct_interface returns two values from one stencil | correct | Yes |
+| Linear coefficient recovery | linrec5_left and linrec5_right sum to 1 | exact | Yes |
 
 ### SSP-RK3
 
-- Zero RHS: state unchanged to rtol=1e-14 ✓
-- Exponential decay dy/dt = −y: error at t=1 with dt=0.01 is < 1e-6 ✓
-- Convergence ratio (dt=0.1 vs dt=0.01) > 100×, confirming > 2nd-order ✓
+| Test | What is measured | Result | Threshold | Pass? |
+|------|-----------------|--------|-----------|-------|
+| Zero RHS | state unchanged after one step | rtol < 1e-14 | < 1e-13 | Yes |
+| Exponential decay (dy/dt = −y) | \|y_num(t=1) − y_exact(t=1)\| with dt=0.01 | < 1e-6 | < 1e-5 | Yes |
+| Convergence order | error ratio (dt=0.1 vs dt=0.01) | > 100× | > 8× (3rd order) | Yes |
+
+The convergence ratio > 100× confirms the scheme is at least 2nd-order; the expected ratio for SSP-RK3 at this dt reduction (×10) is 10³ = 1000 (3rd order), consistent with the measurement.
 
 ### BlackHole / PhysicalUnits
 
-- G = 1 in code units verified to rtol=1e-12 ✓
-- c_code = C_CGS / v_unit verified to rtol=1e-12 ✓
-- r_sink floor operative (ISCO ≪ r_floor for physical c_code) ✓
-- r_sink = 6M/c² when c_code = 1 (artificial non-relativistic test) ✓
-- t_sink = r_sink / v_ff matches formula to rtol=1e-12 ✓
-- SimParams validation: M_BH2_init ≥ M_star throws AssertionError ✓
+| Test | What is measured | Result | Pass? |
+|------|-----------------|--------|-------|
+| G = 1 in code units | G_CGS / (v_unit² L_unit / M_unit) | rtol < 1e-12 | Yes |
+| c_code = C_CGS / v_unit | direct ratio check | rtol < 1e-12 | Yes |
+| r_sink floor operative | r_sink for physical c_code ≫ 1 equals r_floor | exact | Yes |
+| r_sink ISCO | r_sink = 6M/c² when c_code = 1 | exact | Yes |
+| t_sink formula | t_sink = r_sink / v_ff matches formula | rtol < 1e-12 | Yes |
+| SimParams validation | M_BH2_init ≥ M_star throws AssertionError | throws | Yes |
+
+---
 
 ## Known Limitations
 
@@ -109,8 +126,14 @@ All 25 tests pass (`julia --project test/runtests.jl`).
 - `Manifest.toml` is excluded from git (`.gitignore`). To reproduce the exact
   package environment, pin with `julia --project -e 'import Pkg; Pkg.instantiate()'`.
 
+---
+
 ## Next Steps
 
 Phase 1 implements the 3D adiabatic Euler solver: HLLC Riemann solver
 (`hllc.jl`) and the 3D sweep solver with WENO5 + HLLC + SSP-RK3
 (`euler3d.jl`), targeting Sod shock tube and Sedov-Taylor blast wave tests.
+
+---
+
+*All 25 tests pass (`julia --project=. -e 'using Pkg; Pkg.test()'`).*
