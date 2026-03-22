@@ -6,21 +6,11 @@
 #   d(ρv)/dt   = −(ρ v_r) r̂ / t_sink        [radial component only — Dempsey+ eq. 6]
 #   d(E)/dt    = −(½ρ v_r² + ρ e_int) / t_sink
 #
-# where:
-#   d    = r_cell − bh.pos          (displacement from BH, code units)
-#   r̂   = d / |d|                   (unit radial vector)
-#   v    = (ρv) / ρ                  (primitive velocity)
-#   v_r  = (v − bh.vel) · r̂         (radial speed in BH rest frame)
-#   e_int = E/ρ − ½|v|²             (specific internal energy)
+# Standard sink (torque_free = false): drains all conserved variables at 1/t_sink.
 #
-# The tangential kinetic energy ½ρ|v_tan|² is NOT removed; gas surrounding the
-# sink conserves angular momentum.  Torque on gas about BH centre = r̂ × r̂ = 0. ✓
-#
-# Standard sink (torque_free = false): drains all conserved variables at 1/t_sink,
-# matching the simplest uniform-drain prescription for comparison tests.
-#
-# BH mass/velocity update (accrete!): BH gains the full gas momentum ρv (not just
-# radial) for strict N-body momentum conservation (CLAUDE.md §4.3).
+# GPU: add_sink_sources! packs BH data into NTuples and dispatches to
+# _sink_sources_kernel! (gpu_kernels.jl).  accrete! runs on CPU only
+# (mutates BlackHole struct).
 
 # ---------------------------------------------------------------------------
 
@@ -29,13 +19,6 @@
                       bhs, x0, y0, z0; f_sink=1.0, torque_free=true)
 
 Add gas-sink source terms to the method-of-lines RHS `dU` for all BHs.
-
-Cells within `r_sink(bh)` of each BH are drained at rate `1 / t_sink(bh, f_sink)`.
-
-- `x0, y0, z0` : physical left edge of the active domain.
-- `f_sink`      : multiplier on the free-fall timescale (default 1.0).
-- `torque_free` : if true, use the torque-free prescription (Dempsey+ 2020);
-                  otherwise drain all conserved variables uniformly.
 """
 function add_sink_sources!(dU, U,
                             nx::Int, ny::Int, nz::Int,
@@ -43,54 +26,25 @@ function add_sink_sources!(dU, U,
                             bhs, x0::Real, y0::Real, z0::Real;
                             f_sink    ::Float64 = 1.0,
                             torque_free::Bool   = true)
-    ng = NG
-    @inbounds for bh in bhs
-        rs = r_sink(bh)
-        ts = t_sink(bh, f_sink)
-        for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
-            xc = x0 + (i - ng - 0.5) * dx
-            yc = y0 + (j - ng - 0.5) * dy
-            zc = z0 + (k - ng - 0.5) * dz
-            ddx = xc - bh.pos[1]
-            ddy = yc - bh.pos[2]
-            ddz = zc - bh.pos[3]
-            r = sqrt(ddx^2 + ddy^2 + ddz^2)
-            r >= rs && continue
+    nbh = length(bhs)
+    bh_px = ntuple(n -> Float64(bhs[n].pos[1]),        nbh)
+    bh_py = ntuple(n -> Float64(bhs[n].pos[2]),        nbh)
+    bh_pz = ntuple(n -> Float64(bhs[n].pos[3]),        nbh)
+    bh_vx = ntuple(n -> Float64(bhs[n].vel[1]),        nbh)
+    bh_vy = ntuple(n -> Float64(bhs[n].vel[2]),        nbh)
+    bh_vz = ntuple(n -> Float64(bhs[n].vel[3]),        nbh)
+    bh_rs = ntuple(n -> Float64(r_sink(bhs[n])),       nbh)
+    bh_ts = ntuple(n -> Float64(t_sink(bhs[n], f_sink)), nbh)
 
-            ρ  = U[1, i, j, k]
-            mx = U[2, i, j, k]; my = U[3, i, j, k]; mz = U[4, i, j, k]
-            E  = U[5, i, j, k]
-
-            dU[1, i, j, k] -= ρ / ts
-
-            if torque_free
-                # Radial unit vector (BH frame)
-                rx = ddx / r;  ry = ddy / r;  rz = ddz / r
-                # Primitive velocity
-                vx = mx / ρ;  vy = my / ρ;  vz = mz / ρ
-                # Relative velocity: gas minus BH
-                vrx = vx - bh.vel[1]
-                vry = vy - bh.vel[2]
-                vrz = vz - bh.vel[3]
-                # Radial speed in BH rest frame
-                v_r = vrx * rx + vry * ry + vrz * rz
-                # Specific internal energy (total − kinetic)
-                e_int = E / ρ - 0.5 * (vx^2 + vy^2 + vz^2)
-                # Dempsey+ 2020 eq. 6: radial momentum only
-                dU[2, i, j, k] -= ρ * v_r * rx / ts
-                dU[3, i, j, k] -= ρ * v_r * ry / ts
-                dU[4, i, j, k] -= ρ * v_r * rz / ts
-                # Dempsey+ 2020 eq. 7: radial KE + thermal
-                dU[5, i, j, k] -= (0.5 * ρ * v_r^2 + ρ * e_int) / ts
-            else
-                # Standard: drain all conserved variables uniformly
-                dU[2, i, j, k] -= mx / ts
-                dU[3, i, j, k] -= my / ts
-                dU[4, i, j, k] -= mz / ts
-                dU[5, i, j, k] -= E  / ts
-            end
-        end
-    end
+    backend = KA.get_backend(U)
+    kern = _sink_sources_kernel!(backend, _WGSIZE_3D)
+    kern(dU, U, nx, ny, nz,
+         Float64(dx), Float64(dy), Float64(dz),
+         Float64(x0), Float64(y0), Float64(z0),
+         bh_px, bh_py, bh_pz, bh_vx, bh_vy, bh_vz,
+         bh_rs, bh_ts, torque_free;
+         ndrange = (nx, ny, nz))
+    KA.synchronize(backend)
     return nothing
 end
 
@@ -104,7 +58,8 @@ conservation; CLAUDE.md §4.3), regardless of the `torque_free` flag used in
 `add_sink_sources!`.  The asymmetry is intentional: torque-free removes only
 radial momentum from the gas, but the BH bookkeeping is fully conservative.
 
-Typical usage: call once per timestep with the pre-step gas state `U`.
+Runs on CPU (mutates BlackHole struct). For GPU simulations, the active-cell
+gas state is copied to host before the loop.
 """
 function accrete!(bh::BlackHole, U,
                   nx::Int, ny::Int, nz::Int,
@@ -115,19 +70,21 @@ function accrete!(bh::BlackHole, U,
     rs  = r_sink(bh)
     ts  = t_sink(bh, f_sink)
     dV  = dx * dy * dz
+    # Copy active-cell slice to host for BH mutation loop (tiny overhead — O(N³))
+    U_host = Array(view(U, :, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz))
     Δm  = 0.0
     ΔPx = 0.0;  ΔPy = 0.0;  ΔPz = 0.0
-    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
-        xc = x0 + (i - ng - 0.5) * dx
-        yc = y0 + (j - ng - 0.5) * dy
-        zc = z0 + (k - ng - 0.5) * dz
+    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+        xc = x0 + (i - 0.5) * dx
+        yc = y0 + (j - 0.5) * dy
+        zc = z0 + (k - 0.5) * dz
         r  = sqrt((xc - bh.pos[1])^2 + (yc - bh.pos[2])^2 + (zc - bh.pos[3])^2)
         r >= rs && continue
         rate = dV / ts * dt
-        Δm  += U[1, i, j, k] * rate
-        ΔPx += U[2, i, j, k] * rate
-        ΔPy += U[3, i, j, k] * rate
-        ΔPz += U[4, i, j, k] * rate
+        Δm  += U_host[1, i, j, k] * rate
+        ΔPx += U_host[2, i, j, k] * rate
+        ΔPy += U_host[3, i, j, k] * rate
+        ΔPz += U_host[4, i, j, k] * rate
     end
     if Δm > 0.0
         M_new       = bh.mass + Δm

@@ -1,7 +1,16 @@
 module BinarySupernova
 
+import KernelAbstractions as KA
+using KernelAbstractions: @kernel, @index, @Const
+using Adapt
+
 # Ghost-cell count — shared by all spatial modules.
 const NG = 3
+
+# ---------------------------------------------------------------------------
+# KA kernel definitions — must be included before the modules that use them.
+# Kernels reference NG, weno5_left/right, _cell_pressure, _EL_from_P,
+# hllc_flux_x/y/z — all defined below or in included files.
 
 # ---------------------------------------------------------------------------
 # WENO5-Z reconstruction and SSP-RK3 integrator — verbatim from HighMachCBD.
@@ -18,6 +27,10 @@ export rk3_step!
 # Phase 1: 3D adiabatic hydrodynamics.
 
 include("hllc.jl")
+
+# GPU kernels — included after hllc.jl/weno5.jl so inline helpers are available.
+include("gpu_kernels.jl")
+
 include("euler3d.jl")
 
 export hllc_flux_x, hllc_flux_y, hllc_flux_z
@@ -25,6 +38,7 @@ export euler3d_step!, euler3d_rhs!, cfl_dt_3d
 export fill_ghost_3d_outflow!, fill_ghost_3d_periodic!
 export apply_floors_3d!
 export sedov_ic_3d!
+export _WGSIZE_3D, _WGSIZE_2D
 
 # ---------------------------------------------------------------------------
 # Phase 2: 3D Fixed Mesh Refinement (4:1 ratio).

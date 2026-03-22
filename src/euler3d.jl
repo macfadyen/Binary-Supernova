@@ -13,9 +13,16 @@
 #
 # Time integration: SSP-RK3 via rk3_step! (rk3.jl).
 # Positivity: density floor + pressure floor applied at each RK stage.
+#
+# GPU: all hot loops dispatch to KA kernels (gpu_kernels.jl).
+# Backend detected via KA.get_backend(U):
+#   CPU Array  → KA.CPU()      (multithreaded, replaces Threads.@threads)
+#   CuArray    → CUDABackend() (A100 PTX)
 
 # ---------------------------------------------------------------------------
 # Boundary conditions
+#
+# Ghost fills use view-based broadcasting — compatible with CPU Array and CuArray.
 
 """
     fill_ghost_3d_outflow!(U, nx, ny, nz)
@@ -24,32 +31,16 @@ Zero-gradient (copy-boundary-cell) ghost fill in all six face directions.
 Order: x faces first, then y, then z — corners are filled correctly.
 """
 function fill_ghost_3d_outflow!(U, nx::Int, ny::Int, nz::Int)
-    ng    = NG
-    nxtot = nx + 2*ng
-    nytot = ny + 2*ng
-    nztot = nz + 2*ng
-
+    ng = NG
     # x faces
-    for k in 1:nztot, j in 1:nytot
-        for q in 1:5, m in 1:ng
-            U[q, m,       j, k] = U[q, ng+1,  j, k]
-            U[q, ng+nx+m, j, k] = U[q, ng+nx, j, k]
-        end
-    end
-    # y faces (includes x-ghost columns)
-    for k in 1:nztot, i in 1:nxtot
-        for q in 1:5, m in 1:ng
-            U[q, i, m,       k] = U[q, i, ng+1,  k]
-            U[q, i, ng+ny+m, k] = U[q, i, ng+ny, k]
-        end
-    end
+    @views U[:, 1:ng,          :, :] .= U[:, ng+1:ng+1,  :, :]
+    @views U[:, ng+nx+1:ng+nx+ng, :, :] .= U[:, ng+nx:ng+nx, :, :]
+    # y faces (includes x-ghost columns already filled)
+    @views U[:, :, 1:ng,          :] .= U[:, :, ng+1:ng+1,  :]
+    @views U[:, :, ng+ny+1:ng+ny+ng, :] .= U[:, :, ng+ny:ng+ny, :]
     # z faces (includes x- and y-ghost cells)
-    for j in 1:nytot, i in 1:nxtot
-        for q in 1:5, m in 1:ng
-            U[q, i, j, m      ] = U[q, i, j, ng+1 ]
-            U[q, i, j, ng+nz+m] = U[q, i, j, ng+nz]
-        end
-    end
+    @views U[:, :, :, 1:ng         ] .= U[:, :, :, ng+1:ng+1  ]
+    @views U[:, :, :, ng+nz+1:ng+nz+ng] .= U[:, :, :, ng+nz:ng+nz]
 end
 
 """
@@ -58,29 +49,16 @@ end
 Periodic ghost fill in all six face directions.
 """
 function fill_ghost_3d_periodic!(U, nx::Int, ny::Int, nz::Int)
-    ng    = NG
-    nxtot = nx + 2*ng
-    nytot = ny + 2*ng
-    nztot = nz + 2*ng
-
-    for k in 1:nztot, j in 1:nytot
-        for q in 1:5, m in 1:ng
-            U[q, m,       j, k] = U[q, ng+nx-(ng-m), j, k]
-            U[q, ng+nx+m, j, k] = U[q, ng+m,         j, k]
-        end
-    end
-    for k in 1:nztot, i in 1:nxtot
-        for q in 1:5, m in 1:ng
-            U[q, i, m,       k] = U[q, i, ng+ny-(ng-m), k]
-            U[q, i, ng+ny+m, k] = U[q, i, ng+m,         k]
-        end
-    end
-    for j in 1:nytot, i in 1:nxtot
-        for q in 1:5, m in 1:ng
-            U[q, i, j, m      ] = U[q, i, j, ng+nz-(ng-m)]
-            U[q, i, j, ng+nz+m] = U[q, i, j, ng+m        ]
-        end
-    end
+    ng = NG
+    # x: left ghost ← last ng active cells; right ghost ← first ng active cells
+    @views U[:, 1:ng,              :, :] .= U[:, nx+1:nx+ng,     :, :]
+    @views U[:, ng+nx+1:ng+nx+ng,  :, :] .= U[:, ng+1:ng+ng,     :, :]
+    # y
+    @views U[:, :, 1:ng,              :] .= U[:, :, ny+1:ny+ng,    :]
+    @views U[:, :, ng+ny+1:ng+ny+ng,  :] .= U[:, :, ng+1:ng+ng,    :]
+    # z
+    @views U[:, :, :, 1:ng             ] .= U[:, :, :, nz+1:nz+ng    ]
+    @views U[:, :, :, ng+nz+1:ng+nz+ng] .= U[:, :, :, ng+1:ng+ng     ]
 end
 
 # ---------------------------------------------------------------------------
@@ -90,35 +68,19 @@ end
     apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
 Clamp density ≥ ρ_floor and pressure ≥ P_floor in all active cells.
-If P < P_floor, internal energy is raised while keeping momentum fixed.
-Applied at the beginning of each SSP-RK3 stage.
+Dispatches to KA kernel for CPU/GPU portability.
 """
 function apply_floors_3d!(U, nx::Int, ny::Int, nz::Int,
                            ρ_floor::Real, P_floor::Real, γ::Real)
-    ng = NG
-    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
-        ρ = U[1, i, j, k]
-        if ρ < ρ_floor
-            # Unphysical density: reset to full floor state (zero velocity).
-            # Keeping the original momentum with ρ = ρ_floor gives v = m/ρ_floor
-            # which can be enormous, causing WENO5 to reconstruct energy spikes.
-            U[1, i, j, k] = ρ_floor
-            U[2, i, j, k] = 0.0
-            U[3, i, j, k] = 0.0
-            U[4, i, j, k] = 0.0
-            U[5, i, j, k] = P_floor / (γ - 1)
-        else
-            KE = 0.5 * (U[2,i,j,k]^2 + U[3,i,j,k]^2 + U[4,i,j,k]^2) / ρ
-            P  = (γ - 1) * (U[5, i, j, k] - KE)
-            if P < P_floor
-                U[5, i, j, k] = P_floor / (γ - 1) + KE
-            end
-        end
-    end
+    backend = KA.get_backend(U)
+    kern = _apply_floors_kernel!(backend, _WGSIZE_3D)
+    kern(U, nx, ny, nz, Float64(ρ_floor), Float64(P_floor), Float64(γ);
+         ndrange = (nx, ny, nz))
+    KA.synchronize(backend)
 end
 
 # ---------------------------------------------------------------------------
-# WENO5+HLLC flux computation
+# WENO5+HLLC flux computation — helpers for pressure reconstruction
 
 # Helper: cell-average pressure, guaranteed ≥ 0.
 @inline function _cell_pressure(ρ, mx, my, mz, E, γ)
@@ -128,109 +90,34 @@ end
 end
 
 # Reconstruct total energy from pressure + reconstructed primitives.
-# Ensures E ≥ KE ≥ 0 by construction (prevents WENO5 overshoot of E at
-# strong blast-background discontinuities where E contrast can exceed 3×10⁶).
 @inline function _EL_from_P(PL, ρL, mxL, myL, mzL, γ)
     ρ_pos = max(ρL, 1e-30)
     KE    = ρL > 0.0 ? 0.5 * (mxL^2 + myL^2 + mzL^2) / ρ_pos : 0.0
     return PL / (γ - 1) + KE
 end
 
-# x-direction fluxes.
-# Fx[q, i, j, k] = flux at right face of cell (i,j,k), i.e., between i and i+1.
-# Computed for i ∈ NG:NG+nx (nx+1 interfaces).
+# x-direction fluxes — dispatches to KA kernel.
 function _weno_fluxes_x!(Fx, U, nx::Int, ny::Int, nz::Int, γ::Real)
-    ng = NG
-    Threads.@threads :static for k in ng+1:ng+nz
-        for j in ng+1:ng+ny, i in ng:ng+nx
-            ρL  = weno5_left( U[1,i-2,j,k],U[1,i-1,j,k],U[1,i,j,k],U[1,i+1,j,k],U[1,i+2,j,k])
-            ρR  = weno5_right(U[1,i-1,j,k],U[1,i,j,k],U[1,i+1,j,k],U[1,i+2,j,k],U[1,i+3,j,k])
-            mxL = weno5_left( U[2,i-2,j,k],U[2,i-1,j,k],U[2,i,j,k],U[2,i+1,j,k],U[2,i+2,j,k])
-            mxR = weno5_right(U[2,i-1,j,k],U[2,i,j,k],U[2,i+1,j,k],U[2,i+2,j,k],U[2,i+3,j,k])
-            myL = weno5_left( U[3,i-2,j,k],U[3,i-1,j,k],U[3,i,j,k],U[3,i+1,j,k],U[3,i+2,j,k])
-            myR = weno5_right(U[3,i-1,j,k],U[3,i,j,k],U[3,i+1,j,k],U[3,i+2,j,k],U[3,i+3,j,k])
-            mzL = weno5_left( U[4,i-2,j,k],U[4,i-1,j,k],U[4,i,j,k],U[4,i+1,j,k],U[4,i+2,j,k])
-            mzR = weno5_right(U[4,i-1,j,k],U[4,i,j,k],U[4,i+1,j,k],U[4,i+2,j,k],U[4,i+3,j,k])
-            # Reconstruct pressure via WENO5 on cell-average P; clamp to stencil
-            # range to prevent overshoot, then reconstruct E = P/(γ-1) + KE.
-            pi2 = _cell_pressure(U[1,i-2,j,k],U[2,i-2,j,k],U[3,i-2,j,k],U[4,i-2,j,k],U[5,i-2,j,k],γ)
-            pi1 = _cell_pressure(U[1,i-1,j,k],U[2,i-1,j,k],U[3,i-1,j,k],U[4,i-1,j,k],U[5,i-1,j,k],γ)
-            p0  = _cell_pressure(U[1,i  ,j,k],U[2,i  ,j,k],U[3,i  ,j,k],U[4,i  ,j,k],U[5,i  ,j,k],γ)
-            pp1 = _cell_pressure(U[1,i+1,j,k],U[2,i+1,j,k],U[3,i+1,j,k],U[4,i+1,j,k],U[5,i+1,j,k],γ)
-            pp2 = _cell_pressure(U[1,i+2,j,k],U[2,i+2,j,k],U[3,i+2,j,k],U[4,i+2,j,k],U[5,i+2,j,k],γ)
-            pp3 = _cell_pressure(U[1,i+3,j,k],U[2,i+3,j,k],U[3,i+3,j,k],U[4,i+3,j,k],U[5,i+3,j,k],γ)
-            P_maxL = max(pi2, pi1, p0, pp1, pp2)
-            P_maxR = max(pi1, p0,  pp1, pp2, pp3)
-            PL = clamp(weno5_left( pi2, pi1, p0, pp1, pp2), 0.0, P_maxL)
-            PR = clamp(weno5_right(pi1, p0,  pp1, pp2, pp3), 0.0, P_maxR)
-            EL = _EL_from_P(PL, ρL, mxL, myL, mzL, γ)
-            ER = _EL_from_P(PR, ρR, mxR, myR, mzR, γ)
-            Fx[1,i,j,k],Fx[2,i,j,k],Fx[3,i,j,k],Fx[4,i,j,k],Fx[5,i,j,k] =
-                hllc_flux_x(ρL,mxL,myL,mzL,EL, ρR,mxR,myR,mzR,ER, γ)
-        end
-    end
+    backend = KA.get_backend(U)
+    kern = _weno_fluxes_x_kernel!(backend, _WGSIZE_3D)
+    kern(Fx, U, nx, ny, nz, Float64(γ); ndrange = (nx+1, ny, nz))
+    KA.synchronize(backend)
 end
 
-# y-direction fluxes.
+# y-direction fluxes — dispatches to KA kernel.
 function _weno_fluxes_y!(Fy, U, nx::Int, ny::Int, nz::Int, γ::Real)
-    ng = NG
-    Threads.@threads :static for k in ng+1:ng+nz
-        for j in ng:ng+ny, i in ng+1:ng+nx
-            ρL  = weno5_left( U[1,i,j-2,k],U[1,i,j-1,k],U[1,i,j,k],U[1,i,j+1,k],U[1,i,j+2,k])
-            ρR  = weno5_right(U[1,i,j-1,k],U[1,i,j,k],U[1,i,j+1,k],U[1,i,j+2,k],U[1,i,j+3,k])
-            mxL = weno5_left( U[2,i,j-2,k],U[2,i,j-1,k],U[2,i,j,k],U[2,i,j+1,k],U[2,i,j+2,k])
-            mxR = weno5_right(U[2,i,j-1,k],U[2,i,j,k],U[2,i,j+1,k],U[2,i,j+2,k],U[2,i,j+3,k])
-            myL = weno5_left( U[3,i,j-2,k],U[3,i,j-1,k],U[3,i,j,k],U[3,i,j+1,k],U[3,i,j+2,k])
-            myR = weno5_right(U[3,i,j-1,k],U[3,i,j,k],U[3,i,j+1,k],U[3,i,j+2,k],U[3,i,j+3,k])
-            mzL = weno5_left( U[4,i,j-2,k],U[4,i,j-1,k],U[4,i,j,k],U[4,i,j+1,k],U[4,i,j+2,k])
-            mzR = weno5_right(U[4,i,j-1,k],U[4,i,j,k],U[4,i,j+1,k],U[4,i,j+2,k],U[4,i,j+3,k])
-            pi2 = _cell_pressure(U[1,i,j-2,k],U[2,i,j-2,k],U[3,i,j-2,k],U[4,i,j-2,k],U[5,i,j-2,k],γ)
-            pi1 = _cell_pressure(U[1,i,j-1,k],U[2,i,j-1,k],U[3,i,j-1,k],U[4,i,j-1,k],U[5,i,j-1,k],γ)
-            p0  = _cell_pressure(U[1,i,j  ,k],U[2,i,j  ,k],U[3,i,j  ,k],U[4,i,j  ,k],U[5,i,j  ,k],γ)
-            pp1 = _cell_pressure(U[1,i,j+1,k],U[2,i,j+1,k],U[3,i,j+1,k],U[4,i,j+1,k],U[5,i,j+1,k],γ)
-            pp2 = _cell_pressure(U[1,i,j+2,k],U[2,i,j+2,k],U[3,i,j+2,k],U[4,i,j+2,k],U[5,i,j+2,k],γ)
-            pp3 = _cell_pressure(U[1,i,j+3,k],U[2,i,j+3,k],U[3,i,j+3,k],U[4,i,j+3,k],U[5,i,j+3,k],γ)
-            P_maxL = max(pi2, pi1, p0, pp1, pp2)
-            P_maxR = max(pi1, p0,  pp1, pp2, pp3)
-            PL = clamp(weno5_left( pi2, pi1, p0, pp1, pp2), 0.0, P_maxL)
-            PR = clamp(weno5_right(pi1, p0,  pp1, pp2, pp3), 0.0, P_maxR)
-            EL = _EL_from_P(PL, ρL, mxL, myL, mzL, γ)
-            ER = _EL_from_P(PR, ρR, mxR, myR, mzR, γ)
-            Fy[1,i,j,k],Fy[2,i,j,k],Fy[3,i,j,k],Fy[4,i,j,k],Fy[5,i,j,k] =
-                hllc_flux_y(ρL,mxL,myL,mzL,EL, ρR,mxR,myR,mzR,ER, γ)
-        end
-    end
+    backend = KA.get_backend(U)
+    kern = _weno_fluxes_y_kernel!(backend, _WGSIZE_3D)
+    kern(Fy, U, nx, ny, nz, Float64(γ); ndrange = (nx, ny+1, nz))
+    KA.synchronize(backend)
 end
 
-# z-direction fluxes.
+# z-direction fluxes — dispatches to KA kernel.
 function _weno_fluxes_z!(Fz, U, nx::Int, ny::Int, nz::Int, γ::Real)
-    ng = NG
-    Threads.@threads :static for k in ng:ng+nz
-        for j in ng+1:ng+ny, i in ng+1:ng+nx
-            ρL  = weno5_left( U[1,i,j,k-2],U[1,i,j,k-1],U[1,i,j,k],U[1,i,j,k+1],U[1,i,j,k+2])
-            ρR  = weno5_right(U[1,i,j,k-1],U[1,i,j,k],U[1,i,j,k+1],U[1,i,j,k+2],U[1,i,j,k+3])
-            mxL = weno5_left( U[2,i,j,k-2],U[2,i,j,k-1],U[2,i,j,k],U[2,i,j,k+1],U[2,i,j,k+2])
-            mxR = weno5_right(U[2,i,j,k-1],U[2,i,j,k],U[2,i,j,k+1],U[2,i,j,k+2],U[2,i,j,k+3])
-            myL = weno5_left( U[3,i,j,k-2],U[3,i,j,k-1],U[3,i,j,k],U[3,i,j,k+1],U[3,i,j,k+2])
-            myR = weno5_right(U[3,i,j,k-1],U[3,i,j,k],U[3,i,j,k+1],U[3,i,j,k+2],U[3,i,j,k+3])
-            mzL = weno5_left( U[4,i,j,k-2],U[4,i,j,k-1],U[4,i,j,k],U[4,i,j,k+1],U[4,i,j,k+2])
-            mzR = weno5_right(U[4,i,j,k-1],U[4,i,j,k],U[4,i,j,k+1],U[4,i,j,k+2],U[4,i,j,k+3])
-            pi2 = _cell_pressure(U[1,i,j,k-2],U[2,i,j,k-2],U[3,i,j,k-2],U[4,i,j,k-2],U[5,i,j,k-2],γ)
-            pi1 = _cell_pressure(U[1,i,j,k-1],U[2,i,j,k-1],U[3,i,j,k-1],U[4,i,j,k-1],U[5,i,j,k-1],γ)
-            p0  = _cell_pressure(U[1,i,j,k  ],U[2,i,j,k  ],U[3,i,j,k  ],U[4,i,j,k  ],U[5,i,j,k  ],γ)
-            pp1 = _cell_pressure(U[1,i,j,k+1],U[2,i,j,k+1],U[3,i,j,k+1],U[4,i,j,k+1],U[5,i,j,k+1],γ)
-            pp2 = _cell_pressure(U[1,i,j,k+2],U[2,i,j,k+2],U[3,i,j,k+2],U[4,i,j,k+2],U[5,i,j,k+2],γ)
-            pp3 = _cell_pressure(U[1,i,j,k+3],U[2,i,j,k+3],U[3,i,j,k+3],U[4,i,j,k+3],U[5,i,j,k+3],γ)
-            P_maxL = max(pi2, pi1, p0, pp1, pp2)
-            P_maxR = max(pi1, p0,  pp1, pp2, pp3)
-            PL = clamp(weno5_left( pi2, pi1, p0, pp1, pp2), 0.0, P_maxL)
-            PR = clamp(weno5_right(pi1, p0,  pp1, pp2, pp3), 0.0, P_maxR)
-            EL = _EL_from_P(PL, ρL, mxL, myL, mzL, γ)
-            ER = _EL_from_P(PR, ρR, mxR, myR, mzR, γ)
-            Fz[1,i,j,k],Fz[2,i,j,k],Fz[3,i,j,k],Fz[4,i,j,k],Fz[5,i,j,k] =
-                hllc_flux_z(ρL,mxL,myL,mzL,EL, ρR,mxR,myR,mzR,ER, γ)
-        end
-    end
+    backend = KA.get_backend(U)
+    kern = _weno_fluxes_z_kernel!(backend, _WGSIZE_3D)
+    kern(Fz, U, nx, ny, nz, Float64(γ); ndrange = (nx, ny, nz+1))
+    KA.synchronize(backend)
 end
 
 # ---------------------------------------------------------------------------
@@ -239,16 +126,13 @@ end
 function _flux_divergence_3d!(dU, Fx, Fy, Fz,
                                nx::Int, ny::Int, nz::Int,
                                dx::Real, dy::Real, dz::Real)
-    ng = NG
     fill!(dU, zero(eltype(dU)))
-    inv_dx = 1.0 / dx;  inv_dy = 1.0 / dy;  inv_dz = 1.0 / dz
-    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
-        for q in 1:5
-            dU[q,i,j,k] = -(Fx[q,i,j,k] - Fx[q,i-1,j,k]) * inv_dx -
-                            (Fy[q,i,j,k] - Fy[q,i,j-1,k]) * inv_dy -
-                            (Fz[q,i,j,k] - Fz[q,i,j,k-1]) * inv_dz
-        end
-    end
+    backend = KA.get_backend(dU)
+    kern = _flux_divergence_kernel!(backend, _WGSIZE_3D)
+    kern(dU, Fx, Fy, Fz, nx, ny, nz,
+         1.0/Float64(dx), 1.0/Float64(dy), 1.0/Float64(dz);
+         ndrange = (nx, ny, nz))
+    KA.synchronize(backend)
 end
 
 # ---------------------------------------------------------------------------
@@ -259,27 +143,19 @@ end
 
 CFL-limited timestep for 3D adiabatic Euler.
 dt = cfl × min over active cells of min(dx,dy,dz) / (|v| + cs).
+Dispatches to KA kernel; final maximum reduction uses Base.maximum.
 """
 function cfl_dt_3d(U, nx::Int, ny::Int, nz::Int,
                    dx::Real, dy::Real, dz::Real,
                    γ::Real, cfl::Real)
-    ng = NG
-    smax = 0.0
-    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
-        ρ  = U[1, i, j, k]
-        ρ  = max(ρ, 1e-30)
-        vx = U[2, i, j, k] / ρ
-        vy = U[3, i, j, k] / ρ
-        vz = U[4, i, j, k] / ρ
-        KE = 0.5 * (vx^2 + vy^2 + vz^2)
-        P  = max((γ - 1) * (U[5, i, j, k] / ρ - KE) * ρ, 0.0)
-        cs = sqrt(γ * P / ρ)
-        sx = (abs(vx) + cs) / dx
-        sy = (abs(vy) + cs) / dy
-        sz = (abs(vz) + cs) / dz
-        s  = max(sx, sy, sz)
-        smax = max(smax, s)
-    end
+    backend = KA.get_backend(U)
+    speeds  = KA.zeros(backend, Float64, nx, ny, nz)
+    kern = _cfl_speeds_kernel!(backend, _WGSIZE_3D)
+    kern(speeds, U, nx, ny, nz, Float64(γ),
+         1.0/Float64(dx), 1.0/Float64(dy), 1.0/Float64(dz);
+         ndrange = (nx, ny, nz))
+    KA.synchronize(backend)
+    smax = maximum(speeds)
     return smax > 0.0 ? cfl / smax : Inf
 end
 
@@ -293,8 +169,6 @@ end
 Compute the method-of-lines RHS: dU = L(U) = −∂F/∂x − ∂G/∂y − ∂H/∂z.
 Fills `Fx`, `Fy`, `Fz` (WENO5+HLLC fluxes) and `dU` (flux divergence).
 When `fill_ghosts=false`, skips the BC ghost fill (caller is responsible).
-Used by `euler3d_step!` and by `fmr3d_step!` (which manages fine ghost fill
-separately via prolongation from the coarse level).
 """
 function euler3d_rhs!(dU, Fx, Fy, Fz, U,
                       nx::Int, ny::Int, nz::Int,
@@ -332,6 +206,7 @@ Advance 3D adiabatic Euler by one SSP-RK3 step.
 `U` has size `(5, nx+2*NG, ny+2*NG, nz+2*NG)`.
 `bc` ∈ {:outflow, :periodic}.
 Floors applied at the start of each RK stage.
+Works with CPU Array or CuArray — flux buffers allocated via `similar`.
 """
 function euler3d_step!(U, nx::Int, ny::Int, nz::Int,
                        dx::Real, dy::Real, dz::Real, dt::Real, γ::Real;
@@ -343,10 +218,11 @@ function euler3d_step!(U, nx::Int, ny::Int, nz::Int,
     nytot = ny + 2*ng
     nztot = nz + 2*ng
 
-    Fx = zeros(eltype(U), 5, nxtot+1, nytot,   nztot  )
-    Fy = zeros(eltype(U), 5, nxtot,   nytot+1, nztot  )
-    Fz = zeros(eltype(U), 5, nxtot,   nytot,   nztot+1)
-    dU = zeros(eltype(U), 5, nxtot,   nytot,   nztot  )
+    # similar allocates on the same device as U (CPU Array → Array, CuArray → CuArray)
+    Fx = similar(U, 5, nxtot+1, nytot,   nztot  )
+    Fy = similar(U, 5, nxtot,   nytot+1, nztot  )
+    Fz = similar(U, 5, nxtot,   nytot,   nztot+1)
+    dU = similar(U, 5, nxtot,   nytot,   nztot  )
 
     Un = copy(U)
 
@@ -386,10 +262,6 @@ end
 Initialise a Sedov-Taylor point explosion centred at the origin.
 Energy `E_blast` is deposited uniformly in cells within radius `r_inject`
 (default: 2.5 × min(dx,dy,dz)).  Background: ρ = ρ_bg, P = P_floor.
-
-The domain origin corresponds to array index (NG + nx÷2 + 1, ...) when the
-grid is centred, or (NG+1, ...) when the corner is at the origin.
-Pass `x_offset, y_offset, z_offset` for the centre in physical coordinates.
 """
 function sedov_ic_3d!(U, nx::Int, ny::Int, nz::Int,
                       dx::Real, dy::Real, dz::Real, γ::Real;
@@ -403,13 +275,9 @@ function sedov_ic_3d!(U, nx::Int, ny::Int, nz::Int,
     ng = NG
     r_inj = isnothing(r_inject) ? 2.5 * min(dx, dy, dz) : Float64(r_inject)
 
-    # x_offset, y_offset, z_offset are the physical coordinates of the LEFT edge
-    # of the active domain.  Cell centre of active cell i (1-indexed within active
-    # region) is at x_offset + (i - 0.5)*dx.  Set offsets to -L for a [-L,L]³ domain.
-
     # Background state.
     fill!(U, 0.0)
-    E_bg = P_floor / (γ - 1)    # internal energy density at background P
+    E_bg = P_floor / (γ - 1)
     @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
         U[1, i, j, k] = ρ_bg
         U[5, i, j, k] = E_bg
@@ -433,7 +301,7 @@ function sedov_ic_3d!(U, nx::Int, ny::Int, nz::Int,
         zc = (k - ng - 0.5) * dz + z_offset
         r  = sqrt(xc^2 + yc^2 + zc^2)
         if r <= r_inj
-            U[5, i, j, k] += dE_cell   # add pressure / (γ-1) to E
+            U[5, i, j, k] += dE_cell
         end
     end
 end
