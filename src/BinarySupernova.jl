@@ -179,6 +179,18 @@ include("stellar_ic.jl")
 export lane_emden, polytrope_ic_3d!, thermal_bomb!
 
 # ---------------------------------------------------------------------------
+# Phase 6: Diagnostics and I/O.
+
+include("diagnostics.jl")
+include("io.jl")
+
+export gas_energy_total, gas_kinetic_total, gas_momentum_total
+export gas_angular_momentum_total
+export bh_kinetic_total, bh_angular_momentum_total, bound_gas_mass
+export write_snapshot, read_snapshot
+export init_trajectory_file, append_trajectory, read_trajectory
+
+# ---------------------------------------------------------------------------
 # SimParams — all physics parameters for a run.
 
 """
