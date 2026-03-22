@@ -179,6 +179,13 @@ include("stellar_ic.jl")
 export lane_emden, polytrope_ic_3d!, thermal_bomb!
 
 # ---------------------------------------------------------------------------
+# Phase 7: Gas self-gravity (FFT Poisson solver, isolated BCs).
+
+include("self_gravity.jl")
+
+export solve_poisson_isolated, add_self_gravity_source!
+
+# ---------------------------------------------------------------------------
 # Phase 6: Diagnostics and I/O.
 
 include("diagnostics.jl")
