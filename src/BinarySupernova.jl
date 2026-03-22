@@ -1,5 +1,8 @@
 module BinarySupernova
 
+# Ghost-cell count — shared by all spatial modules.
+const NG = 3
+
 # ---------------------------------------------------------------------------
 # WENO5-Z reconstruction and SSP-RK3 integrator — verbatim from HighMachCBD.
 # Borges et al. (2008) WENO-Z; Shu & Osher (1988) SSP-RK3.
@@ -10,6 +13,18 @@ include("rk3.jl")
 export weno5_left, weno5_right, weno5_reconstruct_interface
 export linrec5_left, linrec5_right
 export rk3_step!
+
+# ---------------------------------------------------------------------------
+# Phase 1: 3D adiabatic hydrodynamics.
+
+include("hllc.jl")
+include("euler3d.jl")
+
+export hllc_flux_x, hllc_flux_y, hllc_flux_z
+export euler3d_step!, cfl_dt_3d
+export fill_ghost_3d_outflow!, fill_ghost_3d_periodic!
+export apply_floors_3d!
+export sedov_ic_3d!
 
 # ---------------------------------------------------------------------------
 # Physical constants (CGS)
