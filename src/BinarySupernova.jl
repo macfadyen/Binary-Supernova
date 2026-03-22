@@ -159,6 +159,19 @@ end
 export BlackHole, r_sink, t_sink
 
 # ---------------------------------------------------------------------------
+# Phase 3: N-body BHs + gas sinks.
+# Must follow BlackHole / r_sink / t_sink definitions above.
+
+include("gravity_bh.jl")
+include("nbody.jl")
+include("sinks.jl")
+
+export bh_potential, bh_accel
+export add_bh_gravity_source!, gas_force_on_bh
+export nbody_step!
+export add_sink_sources!, accrete!
+
+# ---------------------------------------------------------------------------
 # SimParams — all physics parameters for a run.
 
 """
