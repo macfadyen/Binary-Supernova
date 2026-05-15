@@ -67,26 +67,29 @@ end
 
 """
     polytrope_ic_3d!(U, nx, ny, nz, dx, dy, dz, γ;
-                     M_star, R_star,
+                     M_star, R_star, M_core=0.0,
                      x0=0, y0=0, z0=0,
                      x_center=0, y_center=0, z_center=0,
-                     ρ_floor=1e-10, P_floor=1e-8) -> (ρ_c, r_scale, K)
+                     ρ_floor=1e-10, P_floor=1e-8) -> (ρ_c, r_scale, K, r_core)
 
-Fill active cells of `U` with a Lane-Emden polytrope of index n = 1/(γ−1).
+Fill active cells of `U` with a Lane-Emden polytrope of index n = 1/(γ−1)
+of total mass `M_star` and radius `R_star`.
 
-The stellar centre is at (`x_center`, `y_center`, `z_center`) in physical
-coordinates.  `x0, y0, z0` are the physical left edges of the active domain
-(active cell (ng+1) has centre x0 + dx/2, matching euler3d.jl convention).
-Cells outside R_star receive floor values (zero velocity).
+If `M_core > 0`, hollow out the inner sphere of radius `r_core` (defined by
+∫₀^r_core 4πρ r² dr = M_core, computed from the Lane-Emden mass profile)
+by setting cells with r < r_core to floor values.  This is the design in
+CLAUDE.md §6.1: the core mass becomes BH2 at t = 0 and must not appear as
+gas on the grid, otherwise BH2 instantly accretes its own progenitor.
 
-Returns ρ_c, r_scale = R_star/ξ_1, and the polytropic constant K (all in
-code units, G = 1).
+Cells outside R_star receive floor values (zero velocity).  Returns
+(ρ_c, r_scale = R_star/ξ_1, K, r_core); r_core = 0 if M_core = 0.
 """
 function polytrope_ic_3d!(U,
                            nx::Int, ny::Int, nz::Int,
                            dx::Real, dy::Real, dz::Real, γ::Real;
                            M_star   ::Real,
                            R_star   ::Real,
+                           M_core   ::Real = 0.0,
                            x0       ::Real = 0.0,
                            y0       ::Real = 0.0,
                            z0       ::Real = 0.0,
@@ -121,16 +124,43 @@ function polytrope_ic_3d!(U,
         return (1.0 - α) * θs[i] + α * θs[i+1]
     end
 
+    # --- Find r_core such that M(<r_core) = M_core ---
+    # Lane-Emden mass interior to ξ:  M(<ξ) = 4π ρ_c r_scale³ × (-ξ² dθ/dξ)
+    # so M(<ξ)/M_star = (-ξ² dθ/dξ) / ω_n.
+    r_core = 0.0
+    if M_core > 0.0
+        M_core < M_star || error("polytrope_ic_3d!: M_core ($M_core) ≥ M_star ($M_star)")
+        target = Float64(M_core) / Float64(M_star)
+        ξ_core = ξ_1
+        @inbounds for i in 1:N_ξ
+            frac = -ξs[i]^2 * dθs[i] / ω_n
+            if frac >= target
+                # Linear interp in (ξ, frac) between i-1 and i for smooth root.
+                if i > 1
+                    f0 = -ξs[i-1]^2 * dθs[i-1] / ω_n
+                    α  = (target - f0) / (frac - f0)
+                    ξ_core = ξs[i-1] + α * (ξs[i] - ξs[i-1])
+                else
+                    ξ_core = ξs[i]
+                end
+                break
+            end
+        end
+        r_core = ξ_core * r_scale
+    end
+    r_core2 = r_core^2
+
     # --- Fill grid ---
     ng = NG
     @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
         xc = x0 + (i - ng - 0.5) * Float64(dx) - Float64(x_center)
         yc = y0 + (j - ng - 0.5) * Float64(dy) - Float64(y_center)
         zc = z0 + (k - ng - 0.5) * Float64(dz) - Float64(z_center)
-        r  = sqrt(xc^2 + yc^2 + zc^2)
+        r2 = xc^2 + yc^2 + zc^2
+        r  = sqrt(r2)
         th = θ_at(r / r_scale)
 
-        if th > 0.0
+        if th > 0.0 && r2 >= r_core2
             ρ = ρ_c * th^n
             P = K * ρ^(1.0 + 1.0/n)
         else
@@ -144,7 +174,7 @@ function polytrope_ic_3d!(U,
         U[5, i, j, k] = P / (γ - 1.0)
     end
 
-    return ρ_c, r_scale, K
+    return ρ_c, r_scale, K, r_core
 end
 
 # ---------------------------------------------------------------------------
@@ -152,55 +182,71 @@ end
 
 """
     thermal_bomb!(U, nx, ny, nz, dx, dy, dz;
-                  E_SN, r_bomb,
+                  E_SN, r_bomb, r_bomb_inner=0.0,
                   x0=0, y0=0, z0=0,
-                  x_center=0, y_center=0, z_center=0) -> M_bomb
+                  x_center=0, y_center=0, z_center=0,
+                  bipolar_theta_deg=180.0) -> M_bomb
 
 Deposit supernova energy `E_SN` as thermal energy, mass-weighted over all
-active cells within radius `r_bomb` of (`x_center`, `y_center`, `z_center`):
+active cells in the spherical shell `r_bomb_inner ≤ r < r_bomb` around
+(`x_center`, `y_center`, `z_center`):
 
 ```
 ΔE[cell] = E_SN × (ρ[cell] dV) / M_bomb
 ```
 
-where M_bomb = ∫_{r<r_bomb} ρ dV.  The sum of all ΔE equals E_SN exactly
-(up to floating-point rounding).
+where M_bomb = ∫_{r_bomb_inner ≤ r < r_bomb} ρ dV.  Total energy deposited
+equals E_SN exactly.  Setting `r_bomb_inner = r_sink(BH2)` excludes cells
+that BH2 would instantly accrete on activation, so the bomb-driven blastwave
+gets a chance to clear the sink region before the first sink sub-step.
 
-Returns M_bomb (total gas mass inside the bomb sphere).
+`bipolar_theta_deg` restricts deposition to a pair of axial cones of half
+opening angle `θ_j` around ±ẑ (the spin axis): cells are included only when
+|cos θ| ≥ cos θ_j, i.e. within θ_j of either pole.  Default 180° is the
+spherical bomb.  The physical motivation is magneto-rotational / jet-driven
+explosions, which preferentially unbind low-specific-AM polar material
+while leaving the high-AM equatorial belt bound for CBD feeding.
 """
 function thermal_bomb!(U,
                         nx::Int, ny::Int, nz::Int,
                         dx::Real, dy::Real, dz::Real;
-                        E_SN     ::Real,
-                        r_bomb   ::Real,
-                        x0       ::Real = 0.0,
-                        y0       ::Real = 0.0,
-                        z0       ::Real = 0.0,
-                        x_center ::Real = 0.0,
-                        y_center ::Real = 0.0,
-                        z_center ::Real = 0.0)
+                        E_SN             ::Real,
+                        r_bomb           ::Real,
+                        r_bomb_inner     ::Real = 0.0,
+                        x0               ::Real = 0.0,
+                        y0               ::Real = 0.0,
+                        z0               ::Real = 0.0,
+                        x_center         ::Real = 0.0,
+                        y_center         ::Real = 0.0,
+                        z_center         ::Real = 0.0,
+                        bipolar_theta_deg::Real = 180.0)
     ng = NG
     dV = Float64(dx) * Float64(dy) * Float64(dz)
+    rin2  = Float64(r_bomb_inner)^2
+    rout2 = Float64(r_bomb)^2
+    μ_min = cos(Float64(bipolar_theta_deg) * π / 180.0)
 
-    # First pass: total gas mass inside r_bomb
     M_bomb = 0.0
     @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
         xc = x0 + (i - ng - 0.5) * dx - x_center
         yc = y0 + (j - ng - 0.5) * dy - y_center
         zc = z0 + (k - ng - 0.5) * dz - z_center
-        sqrt(xc^2 + yc^2 + zc^2) < r_bomb && (M_bomb += U[1, i, j, k] * dV)
+        r2 = xc^2 + yc^2 + zc^2
+        in_shell = (rin2 <= r2 < rout2)
+        in_cone  = (r2 <= 0.0) ? true : (abs(zc) >= sqrt(r2) * μ_min)
+        (in_shell & in_cone) && (M_bomb += U[1, i, j, k] * dV)
     end
-    M_bomb > 0.0 || error("thermal_bomb!: no gas within r_bomb = $r_bomb")
+    M_bomb > 0.0 || error("thermal_bomb!: no gas in shell [$r_bomb_inner, $r_bomb) within cone θ_j=$(bipolar_theta_deg)°")
 
-    # Second pass: deposit energy proportional to local mass density.
-    # ΔU[5] = (E_SN / M_bomb) * ρ  is an energy density [code units / volume].
-    # Total energy deposited: Σ ΔU[5] * dV = (E_SN / M_bomb) * M_bomb = E_SN exactly.
     fac = Float64(E_SN) / M_bomb
     @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
         xc = x0 + (i - ng - 0.5) * dx - x_center
         yc = y0 + (j - ng - 0.5) * dy - y_center
         zc = z0 + (k - ng - 0.5) * dz - z_center
-        sqrt(xc^2 + yc^2 + zc^2) < r_bomb && (U[5, i, j, k] += fac * U[1, i, j, k])
+        r2 = xc^2 + yc^2 + zc^2
+        in_shell = (rin2 <= r2 < rout2)
+        in_cone  = (r2 <= 0.0) ? true : (abs(zc) >= sqrt(r2) * μ_min)
+        (in_shell & in_cone) && (U[5, i, j, k] += fac * U[1, i, j, k])
     end
 
     return M_bomb
