@@ -439,12 +439,17 @@ end
 # Main FMR step
 
 """
-    fmr3d_step!(G, dt_c)
+    fmr3d_step!(G, dt_c; self_gravity=false, G_grav=1.0)
 
 Advance the two-level FMR grid by one coarse timestep `dt_c`.
 Fine sub-steps: `G.ratio` steps of `dt_c / G.ratio` each.
+
+If `self_gravity=true`, solve the composite-density Poisson problem once
+at the start of the step, scale by `G_grav`, and apply the resulting
+frozen Φ as a source term at every SSP-RK3 stage (coarse and fine).
 """
-function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
+function fmr3d_step!(G::FMRGrid3D, dt_c::Float64;
+                     self_gravity::Bool = false, G_grav::Real = 1.0)
     r     = G.ratio
     dt_f  = dt_c / r
     ng    = NG
@@ -454,6 +459,18 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
     P_fl  = G.P_floor
     nc    = G.coarse
     nf    = G.fine
+
+    # Frozen potential: one Poisson solve per coarse step, reused across
+    # all 3 coarse SSP-RK3 stages and all r × 3 fine stages.
+    Φ_c_frozen = nothing
+    Φ_f_frozen = nothing
+    if self_gravity
+        Φ_c_frozen, Φ_f_frozen = solve_fmr_poisson(G)
+        if G_grav != 1.0
+            Φ_c_frozen .*= Float64(G_grav)
+            Φ_f_frozen .*= Float64(G_grav)
+        end
+    end
 
     nxtot_c = nc.nx + 2ng;  nytot_c = nc.ny + 2ng;  nztot_c = nc.nz + 2ng
     nxtot_f = nf.nx + 2ng;  nytot_f = nf.ny + 2ng;  nztot_f = nf.nz + 2ng
@@ -489,6 +506,10 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
                  nc.nx, nc.ny, nc.nz, nc.dx, nc.dy, nc.dz, γ;
                  bc, ρ_floor=ρ_fl, P_floor=P_fl)
     _accumulate_fr_coarse!(fr_c, Fx_c, Fy_c, Fz_c, rk_w[1], dt_c, G)
+    if self_gravity
+        _apply_sg_force_level!(dU_c, nc.U, Φ_c_frozen,
+                               nc.nx, nc.ny, nc.nz, nc.dx, nc.dy, nc.dz)
+    end
     @. nc.U = Un_c + dt_c * dU_c
     apply_floors_3d!(nc.U, nc.nx, nc.ny, nc.nz, ρ_fl, P_fl, γ)
 
@@ -497,6 +518,10 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
                  nc.nx, nc.ny, nc.nz, nc.dx, nc.dy, nc.dz, γ;
                  bc, ρ_floor=ρ_fl, P_floor=P_fl)
     _accumulate_fr_coarse!(fr_c, Fx_c, Fy_c, Fz_c, rk_w[2], dt_c, G)
+    if self_gravity
+        _apply_sg_force_level!(dU_c, nc.U, Φ_c_frozen,
+                               nc.nx, nc.ny, nc.nz, nc.dx, nc.dy, nc.dz)
+    end
     @. nc.U = 0.75 * Un_c + 0.25 * nc.U + 0.25 * dt_c * dU_c
     apply_floors_3d!(nc.U, nc.nx, nc.ny, nc.nz, ρ_fl, P_fl, γ)
 
@@ -505,6 +530,10 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
                  nc.nx, nc.ny, nc.nz, nc.dx, nc.dy, nc.dz, γ;
                  bc, ρ_floor=ρ_fl, P_floor=P_fl)
     _accumulate_fr_coarse!(fr_c, Fx_c, Fy_c, Fz_c, rk_w[3], dt_c, G)
+    if self_gravity
+        _apply_sg_force_level!(dU_c, nc.U, Φ_c_frozen,
+                               nc.nx, nc.ny, nc.nz, nc.dx, nc.dy, nc.dz)
+    end
     @. nc.U = (1/3) * Un_c + (2/3) * nc.U + (2/3) * dt_c * dU_c
     apply_floors_3d!(nc.U, nc.nx, nc.ny, nc.nz, ρ_fl, P_fl, γ)
 
@@ -529,6 +558,10 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
         _prolong_fine_ghosts!(nf.U, U_c_interp, G)
         _fine_rhs!(dU_f, Fx_f, Fy_f, Fz_f, nf.U, G)
         _accumulate_fr_fine!(fr_f, Fx_f, Fy_f, Fz_f, rk_w[1], dt_f, G)
+        if self_gravity
+            _apply_sg_force_level!(dU_f, nf.U, Φ_f_frozen,
+                                   nf.nx, nf.ny, nf.nz, nf.dx, nf.dy, nf.dz)
+        end
         @. nf.U = Un_f + dt_f * dU_f
         apply_floors_3d!(nf.U, nf.nx, nf.ny, nf.nz, ρ_fl, P_fl, γ)
 
@@ -536,6 +569,10 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
         _prolong_fine_ghosts!(nf.U, U_c_interp, G)
         _fine_rhs!(dU_f, Fx_f, Fy_f, Fz_f, nf.U, G)
         _accumulate_fr_fine!(fr_f, Fx_f, Fy_f, Fz_f, rk_w[2], dt_f, G)
+        if self_gravity
+            _apply_sg_force_level!(dU_f, nf.U, Φ_f_frozen,
+                                   nf.nx, nf.ny, nf.nz, nf.dx, nf.dy, nf.dz)
+        end
         @. nf.U = 0.75 * Un_f + 0.25 * nf.U + 0.25 * dt_f * dU_f
         apply_floors_3d!(nf.U, nf.nx, nf.ny, nf.nz, ρ_fl, P_fl, γ)
 
@@ -543,6 +580,10 @@ function fmr3d_step!(G::FMRGrid3D, dt_c::Float64)
         _prolong_fine_ghosts!(nf.U, U_c_interp, G)
         _fine_rhs!(dU_f, Fx_f, Fy_f, Fz_f, nf.U, G)
         _accumulate_fr_fine!(fr_f, Fx_f, Fy_f, Fz_f, rk_w[3], dt_f, G)
+        if self_gravity
+            _apply_sg_force_level!(dU_f, nf.U, Φ_f_frozen,
+                                   nf.nx, nf.ny, nf.nz, nf.dx, nf.dy, nf.dz)
+        end
         @. nf.U = (1/3) * Un_f + (2/3) * nf.U + (2/3) * dt_f * dU_f
         apply_floors_3d!(nf.U, nf.nx, nf.ny, nf.nz, ρ_fl, P_fl, γ)
     end

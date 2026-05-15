@@ -178,11 +178,13 @@ export BlackHole, r_sink, t_sink
 
 include("gravity_bh.jl")
 include("nbody.jl")
+include("kepler_orbit.jl")
 include("sinks.jl")
 
 export bh_potential, bh_accel
 export add_bh_gravity_source!, gas_force_on_bh
 export nbody_step!
+export KeplerOrbit, kepler_update!
 export add_sink_sources!, accrete!
 
 # ---------------------------------------------------------------------------
@@ -191,6 +193,21 @@ export add_sink_sources!, accrete!
 include("stellar_ic.jl")
 
 export lane_emden, polytrope_ic_3d!, thermal_bomb!
+
+# Hachisu (1986a) SCF for rigidly rotating polytropes — self-consistent
+# axisymmetric equilibrium, generalising the non-rotating Lane-Emden IC.
+
+include("rotating_polytrope.jl")
+
+export scf_rotating_polytrope, mass_shedding_limit
+export rotating_polytrope_ic_3d!, axis_ratio_for_spin
+
+# ---------------------------------------------------------------------------
+# Phase 8: MESA stellar profile reader (ported from Binary-PISN).
+
+include("mesa_reader.jl")
+
+export StellarProfile1D, read_mesa_profile
 
 # ---------------------------------------------------------------------------
 # Phase 9: Roche potential relaxation initial conditions.
@@ -206,6 +223,14 @@ include("self_gravity.jl")
 
 export solve_poisson_isolated, add_self_gravity_source!
 
+# FMR-coupled self-gravity: composite-density base-level Poisson solve,
+# trilinear Φ prolongation. Ported from Binary-PISN.
+
+include("fmr_gravity.jl")
+
+export restrict_density_to_coarse!, solve_fmr_poisson
+export add_fmr_self_gravity_source!
+
 # ---------------------------------------------------------------------------
 # Phase 6: Diagnostics and I/O.
 
@@ -217,6 +242,17 @@ export gas_angular_momentum_total
 export bh_kinetic_total, bh_angular_momentum_total, bound_gas_mass
 export write_snapshot, read_snapshot
 export init_trajectory_file, append_trajectory, read_trajectory
+
+# ---------------------------------------------------------------------------
+# Checkpoint/restart and orbit analysis (ported from Binary-PISN).
+# Must follow io.jl (HDF5 imported there) and FMRGrid3D/BlackHole defs above.
+
+include("checkpoint.jl")
+include("orbit_analysis.jl")
+
+export save_checkpoint, load_checkpoint, CHECKPOINT_FORMAT_VERSION
+export orbit_elements, orbit_elements_from_trajectory
+export orbit_elements_from_csv, parse_run_csv
 
 # ---------------------------------------------------------------------------
 # SimParams — all physics parameters for a run.
