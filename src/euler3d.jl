@@ -90,9 +90,18 @@ end
 end
 
 # Reconstruct total energy from pressure + reconstructed primitives.
+# v_cap: maximum allowed specific velocity from WENO5 reconstruction.
+# WENO5 reconstructs ρ and momentum independently; if ρ_recon is small-but-positive
+# (oscillation near a strong discontinuity) while momentum is finite, KE = m²/(2ρ) → ∞.
+# The ρ≤0 guard in _hllc_normal only catches negative ρ, not near-zero positive.
+# Capping v² at v_cap² (100² = 1e4; ~40× max ejecta velocity ≈ 2.5 code units)
+# prevents catastrophic energy injection while leaving all physical states unchanged.
+const _V_CAP_SQ = 1e4   # v_max = 100 code units
 @inline function _EL_from_P(PL, ρL, mxL, myL, mzL, γ)
-    ρ_pos = max(ρL, 1e-30)
-    KE    = ρL > 0.0 ? 0.5 * (mxL^2 + myL^2 + mzL^2) / ρ_pos : 0.0
+    ρ_pos  = max(ρL, 1e-30)
+    m2     = mxL^2 + myL^2 + mzL^2
+    KE_raw = 0.5 * m2 / ρ_pos
+    KE     = min(KE_raw, 0.5 * ρ_pos * _V_CAP_SQ)   # cap v² at _V_CAP_SQ
     return PL / (γ - 1) + KE
 end
 

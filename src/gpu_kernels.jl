@@ -239,7 +239,7 @@ end
                                        dx, dy, dz, x0, y0, z0,
                                        bh_px, bh_py, bh_pz,
                                        bh_vx, bh_vy, bh_vz,
-                                       bh_rs, bh_ts, torque_free)
+                                       bh_rs, bh_ts, torque_free, ρ_sink_min)
     ii, jj, kk = @index(Global, NTuple)
     ng = NG
     i = ii + ng;  j = jj + ng;  k = kk + ng
@@ -251,7 +251,8 @@ end
         mx = U[2, i, j, k];  my = U[3, i, j, k];  mz = U[4, i, j, k]
         E  = U[5, i, j, k]
 
-        for n in 1:length(bh_rs)
+        if ρ > ρ_sink_min
+         for n in 1:length(bh_rs)
             ddx = xc - bh_px[n]
             ddy = yc - bh_py[n]
             ddz = zc - bh_pz[n]
@@ -277,6 +278,7 @@ end
                     dU[5, i, j, k] -= E  / ts
                 end
             end
+         end
         end
     end
 end

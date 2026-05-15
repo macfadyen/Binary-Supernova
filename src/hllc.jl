@@ -31,11 +31,32 @@
         ρR = max(ρR, 1e-30)
     end
 
+    # Velocity cap: WENO5 can give small-positive ρ with finite momentum when
+    # reconstructing across strong discontinuities.  The resulting velocity
+    # v = m/ρ → ∞ drives huge fluxes F_E = (E+P)*v even when energy is bounded.
+    # Rescale the momentum vector to enforce |v| ≤ v_cap = 100 code units
+    # (≈ 40× the max ejecta velocity ≈ 2.5 for these parameters; << c_code ≈ 400).
+    # Direction is preserved; all physical states (|v| ≤ 2.5) are unaffected.
+    m2L = mnL^2 + mt1L^2 + mt2L^2
+    if m2L > ρL^2 * 1e4      # |v|² > 100² = 1e4
+        s = ρL * 100.0 / sqrt(m2L)
+        mnL *= s;  mt1L *= s;  mt2L *= s
+        # EL unchanged: _EL_from_P already capped KE at 0.5*ρ*1e4 = new KE.
+    end
+    m2R = mnR^2 + mt1R^2 + mt2R^2
+    if m2R > ρR^2 * 1e4
+        s = ρR * 100.0 / sqrt(m2R)
+        mnR *= s;  mt1R *= s;  mt2R *= s
+    end
+
     # Clamp total energy to ≥ kinetic energy (ensures internal energy ≥ 0).
     # WENO5 can reconstruct E < 0 at strong discontinuities; a negative E
     # in the physical flux (E + p)*vn would drain total energy unphysically.
-    KE_L = 0.5 * (mnL^2 + mt1L^2 + mt2L^2) / ρL
-    KE_R = 0.5 * (mnR^2 + mt1R^2 + mt2R^2) / ρR
+    # Also cap v² at 1e4 (v_max = 100 code units; ~40× max ejecta velocity).
+    # This matches the cap in _EL_from_P and prevents WENO5 near-vacuum oscillations
+    # (small-positive ρ, finite momentum → v = m/ρ → ∞) from reaching the solver.
+    KE_L = min(0.5 * (mnL^2 + mt1L^2 + mt2L^2) / ρL,  0.5 * ρL * 1e4)
+    KE_R = min(0.5 * (mnR^2 + mt1R^2 + mt2R^2) / ρR,  0.5 * ρR * 1e4)
     EL   = max(EL, KE_L)
     ER   = max(ER, KE_R)
 

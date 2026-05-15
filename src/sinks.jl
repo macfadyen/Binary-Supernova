@@ -8,6 +8,11 @@
 #
 # Standard sink (torque_free = false): drains all conserved variables at 1/t_sink.
 #
+# Density threshold:  cells with ρ ≤ ρ_sink_min are skipped entirely (no drain,
+# no accretion).  Use this to prevent BHs from "accreting the vacuum" when the
+# density floor leaks into the sink region in regions otherwise devoid of gas.
+# Default ρ_sink_min = 0.0 reproduces the original unthresholded behaviour.
+#
 # GPU: add_sink_sources! packs BH data into NTuples and dispatches to
 # _sink_sources_kernel! (gpu_kernels.jl).  accrete! runs on CPU only
 # (mutates BlackHole struct).
@@ -16,16 +21,21 @@
 
 """
     add_sink_sources!(dU, U, nx, ny, nz, dx, dy, dz,
-                      bhs, x0, y0, z0; f_sink=1.0, torque_free=true)
+                      bhs, x0, y0, z0;
+                      f_sink=1.0, torque_free=true, ρ_sink_min=0.0)
 
 Add gas-sink source terms to the method-of-lines RHS `dU` for all BHs.
+
+`ρ_sink_min` skips cells with ρ ≤ ρ_sink_min (prevents draining the ambient
+density floor). Default 0.0 preserves original behaviour.
 """
 function add_sink_sources!(dU, U,
                             nx::Int, ny::Int, nz::Int,
                             dx::Real, dy::Real, dz::Real,
                             bhs, x0::Real, y0::Real, z0::Real;
-                            f_sink    ::Float64 = 1.0,
-                            torque_free::Bool   = true)
+                            f_sink     ::Float64 = 1.0,
+                            torque_free::Bool    = true,
+                            ρ_sink_min ::Float64 = 0.0)
     nbh = length(bhs)
     bh_px = ntuple(n -> Float64(bhs[n].pos[1]),        nbh)
     bh_py = ntuple(n -> Float64(bhs[n].pos[2]),        nbh)
@@ -42,7 +52,7 @@ function add_sink_sources!(dU, U,
          Float64(dx), Float64(dy), Float64(dz),
          Float64(x0), Float64(y0), Float64(z0),
          bh_px, bh_py, bh_pz, bh_vx, bh_vy, bh_vz,
-         bh_rs, bh_ts, torque_free;
+         bh_rs, bh_ts, torque_free, Float64(ρ_sink_min);
          ndrange = (nx, ny, nz))
     KA.synchronize(backend)
     return nothing
@@ -65,7 +75,8 @@ function accrete!(bh::BlackHole, U,
                   nx::Int, ny::Int, nz::Int,
                   dx::Real, dy::Real, dz::Real,
                   x0::Real, y0::Real, z0::Real, dt::Float64;
-                  f_sink::Float64 = 1.0)
+                  f_sink    ::Float64 = 1.0,
+                  ρ_sink_min::Float64 = 0.0)
     ng  = NG
     rs  = r_sink(bh)
     ts  = t_sink(bh, f_sink)
@@ -80,6 +91,7 @@ function accrete!(bh::BlackHole, U,
         zc = z0 + (k - 0.5) * dz
         r  = sqrt((xc - bh.pos[1])^2 + (yc - bh.pos[2])^2 + (zc - bh.pos[3])^2)
         r >= rs && continue
+        U_host[1, i, j, k] <= ρ_sink_min && continue
         rate = dV / ts * dt
         Δm  += U_host[1, i, j, k] * rate
         ΔPx += U_host[2, i, j, k] * rate

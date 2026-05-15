@@ -184,3 +184,65 @@ end
     @info "accrete!: ΔM_bh=$(ΔM_bh), expected=$(ΔM_expected)"
 
 end
+
+@testset "Sink — ρ_sink_min threshold skips low-density cells" begin
+
+    ng = BinarySupernova.NG
+    nx = ny = nz = 8
+    dx = dy = dz = 0.1
+    x0 = y0 = z0 = 0.0
+    dt = 0.01
+
+    γ   = 5.0 / 3.0
+    ρ_floor_like = 1e-3            # ambient "vacuum" density
+    ρ_high       = 1.0              # a few bright cells above threshold
+    P0  = 1e-2
+    U   = zeros(5, nx + 2ng, ny + 2ng, nz + 2ng)
+    for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        U[1, i, j, k] = ρ_floor_like
+        U[5, i, j, k] = P0 / (γ - 1)
+    end
+    # Plant a single high-density cell near the BH centre.
+    ic = ng + nx ÷ 2 + 1
+    U[1, ic, ic, ic] = ρ_high
+    U[5, ic, ic, ic] = P0 / (γ - 1)
+
+    bh_pos  = [x0 + 0.5 * nx * dx, y0 + 0.5 * ny * dy, z0 + 0.5 * nz * dz]
+    r_floor = 3.0 * dx
+    bh = BlackHole(bh_pos, [0.0, 0.0, 0.0], 1.0, 1e-6, 1e6, r_floor)
+    bhs = BlackHole[bh]
+
+    # Threshold well above the floor; well below the peak.
+    ρ_thr = 2.0 * ρ_floor_like
+
+    # --- RHS check: only the high-density cell contributes to the drain
+    dU = zeros(size(U))
+    add_sink_sources!(dU, U, nx, ny, nz, dx, dy, dz, bhs, x0, y0, z0;
+                      torque_free = true, ρ_sink_min = ρ_thr)
+
+    dV = dx * dy * dz
+    ts = t_sink(bh, 1.0)
+    dm_gas_rate = 0.0
+    for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        dm_gas_rate -= dU[1, i, j, k] * dV
+    end
+    expected_rate = ρ_high * dV / ts
+    @test dm_gas_rate ≈ expected_rate  rtol = 1e-14
+
+    # --- accrete! check: only the high-density cell contributes to ΔM
+    M_before = bh.mass
+    accrete!(bh, U, nx, ny, nz, dx, dy, dz, x0, y0, z0, dt;
+             ρ_sink_min = ρ_thr)
+    ΔM = bh.mass - M_before
+    @test ΔM ≈ (ρ_high * dV / ts) * dt  rtol = 1e-10
+
+    # --- Default (ρ_sink_min = 0) reproduces original behaviour
+    bh2 = BlackHole(bh_pos, [0.0, 0.0, 0.0], 1.0, 1e-6, 1e6, r_floor)
+    M_before2 = bh2.mass
+    accrete!(bh2, U, nx, ny, nz, dx, dy, dz, x0, y0, z0, dt)
+    ΔM2 = bh2.mass - M_before2
+    @test ΔM2 > ΔM         # ambient floor cells now counted
+
+    @info "ρ_sink_min: with threshold ΔM=$(ΔM), without ΔM=$(ΔM2)"
+
+end
