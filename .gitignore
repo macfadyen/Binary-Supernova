@@ -4,6 +4,9 @@
 data/
 output/
 
+# Local run artefacts (logs, figures, CSVs from production/demo runs)
+demo1/
+
 # Julia artefacts
 Manifest.toml
 *.jl.cov
