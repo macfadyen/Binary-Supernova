@@ -75,10 +75,10 @@ function gas_angular_momentum_total(U, nx::Int, ny::Int, nz::Int,
     yc_cpu = reshape([y0 + (j - ng - 0.5) * fdy for j in ng+1:ng+ny], 1, ny, 1)
     zc_cpu = reshape([z0 + (k - ng - 0.5) * fdz for k in ng+1:ng+nz], 1, 1, nz)
 
-    backend = KA.get_backend(U)
-    xc = adapt(backend, xc_cpu)
-    yc = adapt(backend, yc_cpu)
-    zc = adapt(backend, zc_cpu)
+    # On U's device via similar + copyto!, not adapt(backend,·) — see self_gravity.jl.
+    xc = similar(U, Float64, nx, 1, 1);  copyto!(xc, xc_cpu)
+    yc = similar(U, Float64, 1, ny, 1);  copyto!(yc, yc_cpu)
+    zc = similar(U, Float64, 1, 1, nz);  copyto!(zc, zc_cpu)
 
     mx = view(U, 2, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
     my = view(U, 3, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
@@ -152,9 +152,9 @@ function bound_gas_mass(U, nx::Int, ny::Int, nz::Int,
     xc_cpu = reshape([x0 + (i - ng - 0.5) * fdx for i in ng+1:ng+nx], nx, 1, 1)
     yc_cpu = reshape([y0 + (j - ng - 0.5) * fdy for j in ng+1:ng+ny], 1, ny, 1)
     zc_cpu = reshape([z0 + (k - ng - 0.5) * fdz for k in ng+1:ng+nz], 1, 1, nz)
-    xc = adapt(backend, xc_cpu)
-    yc = adapt(backend, yc_cpu)
-    zc = adapt(backend, zc_cpu)
+    xc = similar(U, Float64, nx, 1, 1);  copyto!(xc, xc_cpu)   # device, not adapt(backend,·)
+    yc = similar(U, Float64, 1, ny, 1);  copyto!(yc, yc_cpu)
+    zc = similar(U, Float64, 1, 1, nz);  copyto!(zc, zc_cpu)
 
     ρ_s     = max.(ρ_v, 1e-30)
     KE_spec = @. 0.5 * (mx_v^2 + my_v^2 + mz_v^2) / ρ_s

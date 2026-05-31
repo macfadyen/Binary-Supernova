@@ -88,11 +88,10 @@ function relax_damping_source!(dU, U,
     else
         # Co-rotating damping: damp relative to solid-body rotation at Ω.
         # v_rot = (−Ω y, Ω x, 0);  cell centres are x0+(i−ng−0.5)dx, etc.
-        backend = KA.get_backend(U)
         xc_cpu = reshape([x0 + (i - ng - 0.5)*fdx for i in ng+1:ng+nx], nx, 1, 1)
         yc_cpu = reshape([y0 + (j - ng - 0.5)*fdy for j in ng+1:ng+ny], 1, ny, 1)
-        xc = adapt(backend, xc_cpu)
-        yc = adapt(backend, yc_cpu)
+        xc = similar(U, Float64, nx, 1, 1);  copyto!(xc, xc_cpu)   # device, not adapt(backend,·)
+        yc = similar(U, Float64, 1, ny, 1);  copyto!(yc, yc_cpu)
 
         # Primitive velocities
         vx = @. mx / ρ_s
@@ -152,10 +151,15 @@ function rotating_frame_source!(dU, U,
     dU_my = view(dU, 3, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
     dU_E  = view(dU, 5, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
 
-    # Cell-centre x, y measured from the rotation axis (origin).
-    backend = KA.get_backend(U)
-    xc = adapt(backend, reshape([x0 + (i-ng-0.5)*fdx for i in ng+1:ng+nx], nx, 1, 1))
-    yc = adapt(backend, reshape([y0 + (j-ng-0.5)*fdy for j in ng+1:ng+ny], 1, ny, 1))
+    # Cell-centre x, y measured from the rotation axis (origin).  Build on the
+    # host then copy onto U's device with similar + copyto! (host→device on GPU,
+    # plain copy on CPU) — NOT adapt(KA.get_backend(U), ·), which is unreliable
+    # on a KA backend and can leave these on the host, breaking the device
+    # broadcasts below (same hazard fixed in self_gravity.jl).
+    xc_cpu = reshape([x0 + (i-ng-0.5)*fdx for i in ng+1:ng+nx], nx, 1, 1)
+    yc_cpu = reshape([y0 + (j-ng-0.5)*fdy for j in ng+1:ng+ny], 1, ny, 1)
+    xc = similar(U, Float64, nx, 1, 1);  copyto!(xc, xc_cpu)
+    yc = similar(U, Float64, 1, ny, 1);  copyto!(yc, yc_cpu)
 
     # centrifugal ρΩ²(x,y) + Coriolis (2Ω m_y, −2Ω m_x); Coriolis does no work.
     @. dU_mx += Ω² * ρ * xc + 2.0 * Ω * my
