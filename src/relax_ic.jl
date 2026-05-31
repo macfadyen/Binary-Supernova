@@ -115,6 +115,56 @@ function relax_damping_source!(dU, U,
 end
 
 # ---------------------------------------------------------------------------
+# Rotating-frame fictitious forces (centrifugal + Coriolis)
+
+"""
+    rotating_frame_source!(dU, U, nx, ny, nz, dx, dy, dz, x0, y0, z0, Ω)
+
+Add centrifugal and Coriolis source terms for a frame rotating at angular
+velocity `Ω` about ẑ through the origin:
+
+  a_centrifugal = Ω² (x, y, 0)
+  a_Coriolis    = (2Ω v_y, −2Ω v_x, 0)
+  d(ρv)/dt += ρ (a_centrifugal + a_Coriolis)
+  d(E)/dt  += ρ v · a_centrifugal              (Coriolis does no work)
+
+`x, y` are cell-centre coordinates from the rotation axis (the origin).  `U`
+holds rotating-frame velocities; `euler3d_rhs!` + this source together form
+the rotating-frame Euler equations.  `relax_ic!` uses this in co-rotating mode
+so a star settles into tidal (Roche) equilibrium with no orbital drift —
+centrifugal support replaces the missing orbital motion.  View broadcasting
+keeps it CPU/GPU portable.
+"""
+function rotating_frame_source!(dU, U,
+                                 nx::Int, ny::Int, nz::Int,
+                                 dx::Real, dy::Real, dz::Real,
+                                 x0::Real, y0::Real, z0::Real,
+                                 Ω::Float64)
+    ng  = NG
+    fdx = Float64(dx);  fdy = Float64(dy)
+    Ω²  = Ω * Ω
+
+    ρ  = view(U, 1, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
+    mx = view(U, 2, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
+    my = view(U, 3, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
+
+    dU_mx = view(dU, 2, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
+    dU_my = view(dU, 3, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
+    dU_E  = view(dU, 5, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
+
+    # Cell-centre x, y measured from the rotation axis (origin).
+    backend = KA.get_backend(U)
+    xc = adapt(backend, reshape([x0 + (i-ng-0.5)*fdx for i in ng+1:ng+nx], nx, 1, 1))
+    yc = adapt(backend, reshape([y0 + (j-ng-0.5)*fdy for j in ng+1:ng+ny], 1, ny, 1))
+
+    # centrifugal ρΩ²(x,y) + Coriolis (2Ω m_y, −2Ω m_x); Coriolis does no work.
+    @. dU_mx += Ω² * ρ * xc + 2.0 * Ω * my
+    @. dU_my += Ω² * ρ * yc - 2.0 * Ω * mx
+    @. dU_E  += Ω² * (xc * mx + yc * my)
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # Main relaxation driver
 
 """
@@ -126,12 +176,25 @@ end
               self_gravity=false, verbose=false)
     -> NamedTuple (t, n_steps, KE_ratio)
 
-Drive the gas in `U` toward tidal (Roche) equilibrium by velocity damping.
+Drive the gas in `U` toward equilibrium by velocity damping.
 
-SSP-RK3 time integration uses the combined RHS:
-  L(U) = euler_hydro + BH_gravity + [self_gravity] + relax_damping
+`Ω = 0` — inertial-frame damping toward rest (settle an isolated star or damp
+a velocity perturbation).  `Ω > 0` — CO-ROTATING-frame relaxation: centrifugal
+and Coriolis source terms for a frame rotating at `Ω` are added, and the gas
+is damped toward rest in that frame.  A star at its CoM-orbital position with
+the companion BH held fixed is held there by centrifugal support and settles
+into the tidal (Roche) equilibrium with no orbital drift.  `U` holds rotating-
+frame velocities; recover the inertial IC by overlaying  v += Ω ẑ × r.
 
-Stops when KE_gas / E_thermal < `KE_tol` or t ≥ `t_max`.
+SSP-RK3 integration uses the combined RHS:
+  L(U) = euler_hydro + BH_gravity + [self_gravity]
+         + [rotating_frame (Ω>0)] + velocity_damping
+
+Exit: t ≥ `t_max`; or KE_gas/E_thermal < `KE_tol`; or — once KE has descended
+from its initial-transient peak — when it turns back up past its post-peak
+minimum (the star has reached its best-relaxed state and is now degrading; a
+near-Roche-filling star then strips through L1).  Pass `KE_tol = 0` to leave
+only the t_max cap and the KE-minimum stop.
 
 Arguments:
 - `bhs`          : Vector of BlackHole structs; held at fixed positions unless
@@ -139,8 +202,8 @@ Arguments:
 - `x0, y0, z0`   : physical left edges of the active domain.
 - `t_damp`        : velocity damping timescale (code units; ≈ 0.1 P₀ recommended).
 - `t_max`         : maximum relaxation time; exit early if KE_tol is met.
-- `KE_tol`        : fractional KE threshold: KE / E_thermal < KE_tol → converged.
-- `Ω`             : co-rotation angular velocity; 0.0 = simple damping.
+- `KE_tol`        : KE/E_thermal early-exit threshold; 0 ⇒ run the full t_max.
+- `Ω`             : co-rotating-frame angular velocity; 0.0 = inertial damping.
 - `self_gravity`  : include gas self-gravity via `add_self_gravity_source!`.
 - `verbose`       : print convergence info every 20 steps.
 """
@@ -168,10 +231,14 @@ function relax_ic!(U, nx::Int, ny::Int, nz::Int,
     Fz = similar(U, 5, nxtot,   nytot,   nztot+1)
     dU = similar(U, 5, nxtot,   nytot,   nztot  )
     Un = similar(U)
+    corotating = (Ω != 0.0)   # Ω ≠ 0 → co-rotating-frame relaxation
 
     t        = 0.0
     n_steps  = 0
     KE_ratio = Inf
+    ke_peak   = 0.0     # running max of KE_ratio (initial-transient peak)
+    ke_valley = Inf     # running min of KE_ratio after the peak descent
+    descended = false   # set once KE_ratio falls well below ke_peak
 
     while t < t_max && KE_ratio > KE_tol
         dt = min(cfl_dt_3d(U, nx, ny, nz, dx, dy, dz, γ, cfl), t_max - t)
@@ -185,8 +252,10 @@ function relax_ic!(U, nx::Int, ny::Int, nz::Int,
         isempty(bhs) || add_bh_gravity_source!(dU, U, nx, ny, nz, dx, dy, dz,
                                                 bhs, x0, y0, z0)
         self_gravity && add_self_gravity_source!(dU, U, nx, ny, nz, dx, dy, dz)
+        corotating   && rotating_frame_source!(dU, U, nx, ny, nz, dx, dy, dz,
+                                               x0, y0, z0, Ω)
         relax_damping_source!(dU, U, nx, ny, nz, dx, dy, dz, x0, y0, z0,
-                               t_damp; Ω)
+                               t_damp; Ω = 0.0)
         @. U = Un + dt * dU
         apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
@@ -196,8 +265,10 @@ function relax_ic!(U, nx::Int, ny::Int, nz::Int,
         isempty(bhs) || add_bh_gravity_source!(dU, U, nx, ny, nz, dx, dy, dz,
                                                 bhs, x0, y0, z0)
         self_gravity && add_self_gravity_source!(dU, U, nx, ny, nz, dx, dy, dz)
+        corotating   && rotating_frame_source!(dU, U, nx, ny, nz, dx, dy, dz,
+                                               x0, y0, z0, Ω)
         relax_damping_source!(dU, U, nx, ny, nz, dx, dy, dz, x0, y0, z0,
-                               t_damp; Ω)
+                               t_damp; Ω = 0.0)
         @. U = 0.75 * Un + 0.25 * U + 0.25 * dt * dU
         apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
@@ -207,8 +278,10 @@ function relax_ic!(U, nx::Int, ny::Int, nz::Int,
         isempty(bhs) || add_bh_gravity_source!(dU, U, nx, ny, nz, dx, dy, dz,
                                                 bhs, x0, y0, z0)
         self_gravity && add_self_gravity_source!(dU, U, nx, ny, nz, dx, dy, dz)
+        corotating   && rotating_frame_source!(dU, U, nx, ny, nz, dx, dy, dz,
+                                               x0, y0, z0, Ω)
         relax_damping_source!(dU, U, nx, ny, nz, dx, dy, dz, x0, y0, z0,
-                               t_damp; Ω)
+                               t_damp; Ω = 0.0)
         @. U = (1/3) * Un + (2/3) * U + (2/3) * dt * dU
         apply_floors_3d!(U, nx, ny, nz, ρ_floor, P_floor, γ)
 
@@ -222,6 +295,18 @@ function relax_ic!(U, nx::Int, ny::Int, nz::Int,
         E_tot = gas_energy_total(U, nx, ny, nz, dx, dy, dz)
         E_th  = max(E_tot - KE, 0.0)
         KE_ratio = E_th > 0.0 ? KE / E_th : 0.0
+
+        # Stop at the relaxation's best state.  KE rises (initial transient),
+        # falls (damping settles it), then — for a near-Roche-filling star —
+        # rises again as the star strips through L1.  Once KE has descended
+        # ≥10% from its peak, exit when it turns back up ≥10% past the
+        # post-peak minimum: the star has settled and is now degrading.
+        ke_peak = max(ke_peak, KE_ratio)
+        descended || (descended = KE_ratio < 0.9 * ke_peak)
+        if descended
+            ke_valley = min(ke_valley, KE_ratio)
+            KE_ratio > 1.1 * ke_valley && break
+        end
 
         if verbose && n_steps % 20 == 0
             @info "relax_ic!" t=round(t,digits=3) KE_ratio=round(KE_ratio,sigdigits=3) n_steps

@@ -214,7 +214,7 @@ export StellarProfile1D, read_mesa_profile
 
 include("relax_ic.jl")
 
-export relax_ic!, relax_damping_source!
+export relax_ic!, relax_damping_source!, rotating_frame_source!
 
 # ---------------------------------------------------------------------------
 # Phase 7: Gas self-gravity (FFT Poisson solver, isolated BCs).

@@ -21,6 +21,7 @@
 #   julia --project=. scripts/run_sn50_fiducial.jl [--gpu] [--nx NX]
 #                                                  [--a0-rsun A0]
 #                                                  [--torque-free]
+#                                                  [--scf-ic | --relax-ic]
 #                                                  [--no-spin]
 #                                                  [--outdir PATH]
 
@@ -35,6 +36,7 @@ use_gpu     = "--gpu" in ARGS
 torque_free = "--torque-free" in ARGS
 no_spin     = "--no-spin" in ARGS
 scf_ic_arg  = "--scf-ic" in ARGS
+relax_ic_arg = "--relax-ic" in ARGS
 self_gravity_arg = "--self-gravity" in ARGS
 nx_arg = let v = 128
     for (i, arg) in enumerate(ARGS)
@@ -181,6 +183,19 @@ r_bomb_outer_frac_arg = let v = 1.0
     end
     v
 end
+# Mass-based bomb: deposit E_SN in the innermost FRAC of the envelope mass.
+# When > 0 this overrides --r-bomb-outer-frac — the bomb radius is found from
+# the *actual* (post-relaxation) stellar mass profile, so it is robust to a
+# relaxed star whose radius differs from the input R_STAR.  Recommended for
+# --relax-ic; assumes a spherical bomb (a bipolar cone cuts M_bomb further).
+bomb_mass_frac_arg = let v = -1.0
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--bomb-mass-frac" && i < length(ARGS)
+            v = parse(Float64, ARGS[i+1])
+        end
+    end
+    v
+end
 # Rigid spin of the stellar envelope as a multiple of Ω_orb.  Default 1.0 =
 # tidal synchronization.  Values > 1 represent super-synchronous rotation
 # (e.g. CHE progenitors: k ≈ 3–7 with surface velocity a significant fraction
@@ -234,6 +249,32 @@ scf_axis_ratio_arg = let v = 1.0
     end
     v
 end
+# Roche-relaxation IC controls (--relax-ic).  t_damp ≈ 0.1 P₀ ≈ 0.6; the
+# relaxation runs the full t_max — KE_tol = 0 disables the KE/E_th early exit.
+relax_t_damp_arg = let v = 0.6
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--relax-t-damp" && i < length(ARGS)
+            v = parse(Float64, ARGS[i+1])
+        end
+    end
+    v
+end
+relax_t_max_arg = let v = 3.0       # safety cap; relax_ic! stops at the KE minimum
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--relax-t-max" && i < length(ARGS)
+            v = parse(Float64, ARGS[i+1])
+        end
+    end
+    v
+end
+relax_ke_tol_arg = let v = 0.0
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--relax-ke-tol" && i < length(ARGS)
+            v = parse(Float64, ARGS[i+1])
+        end
+    end
+    v
+end
 
 # ---------------------------------------------------------------------------
 # Physical inputs (solar units) + code-unit conversion
@@ -269,7 +310,7 @@ const RHO_SINK_MIN = rho_sink_min_arg > 0 ? rho_sink_min_arg : 2.0 * RHO_FLOOR
 const CFL          = 0.4
 
 # Physics toggles
-const SELF_GRAVITY = self_gravity_arg
+const SELF_GRAVITY = self_gravity_arg || relax_ic_arg   # --relax-ic forces self-gravity on
 const TIDAL_SYNC   = !no_spin         # star rotates at Ω_orb; flag --no-spin disables
 
 const T_END   = t_end_arg
@@ -338,7 +379,164 @@ const Ω_BRK = sqrt(M_STAR / R_STAR^3)
 
 U_cpu = Array(U)
 
-if scf_ic_arg
+# v_gas(r) = v_star + Ω × (r - r_star),   Ω = Ω_spin ẑ,   v_star = (0, v_bh2_y, 0).
+# Hoisted above the IC block so the --relax-ic path can reuse it.
+function apply_stellar_rotation!(U_cpu, γ, Ω, v_star_y,
+                                  x_star, y_star, z_star,
+                                  ρ_thresh)
+    ng = BinarySupernova.NG
+    nxtot, nytot, nztot = size(U_cpu, 2), size(U_cpu, 3), size(U_cpu, 4)
+    nx = nxtot - 2ng;  ny = nytot - 2ng;  nz = nztot - 2ng
+    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        ρ = U_cpu[1, i, j, k]
+        ρ <= ρ_thresh && continue
+        xc = x0 + (i - ng - 0.5) * DX - x_star
+        yc = y0 + (j - ng - 0.5) * DX - y_star
+        vx = -Ω * yc
+        vy = v_star_y + Ω * xc
+        vz = 0.0
+        # U[5] currently holds only E_internal (polytrope sets no KE); P = (γ-1)·E_int.
+        P_internal = U_cpu[5, i, j, k] * (γ - 1.0)
+        U_cpu[2, i, j, k] = ρ * vx
+        U_cpu[3, i, j, k] = ρ * vy
+        U_cpu[4, i, j, k] = ρ * vz
+        U_cpu[5, i, j, k] = P_internal / (γ - 1.0) + 0.5 * ρ * (vx^2 + vy^2 + vz^2)
+    end
+    return nothing
+end
+
+# BH1 on the CoM-centred circular orbit.  Built before the IC block so the
+# --relax-ic path can use it as a fixed gravity source during relaxation.
+bh1 = BlackHole(
+    [x_bh1, 0.0, 0.0],
+    [0.0,   v_bh1_y, 0.0],
+    M_BH1,
+    eps_bh,
+    units.c_code,
+    r_floor)
+@info "BH1" pos=bh1.pos vel=bh1.vel mass=round(bh1.mass,digits=4) r_sink=round(r_sink(bh1),digits=4)
+
+# Radius enclosing the innermost `frac` of the gas mass beyond `r_inner`
+# (gas above ρ_thresh), measured from the star centre.  Keys the core-carve
+# and the thermal bomb to mass fractions of the *relaxed* star — robust to a
+# relaxed star whose extent differs from the input R_STAR.
+function radius_for_mass_fraction(U_cpu, frac, x_star, r_inner,
+                                        nx, ny, nz, dx, x0, y0, z0, ρ_thresh)
+    ng = BinarySupernova.NG
+    dV = dx^3
+    rmax = 0.0
+    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        U_cpu[1, i, j, k] > ρ_thresh || continue
+        xc = x0 + (i-ng-0.5)*dx - x_star
+        yc = y0 + (j-ng-0.5)*dx
+        zc = z0 + (k-ng-0.5)*dx
+        r  = sqrt(xc*xc + yc*yc + zc*zc)
+        r > rmax && (rmax = r)
+    end
+    rmax <= r_inner && return r_inner
+    nbin = 256
+    Δb   = rmax / nbin
+    mbin = zeros(nbin)
+    @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+        ρ = U_cpu[1, i, j, k]
+        ρ > ρ_thresh || continue
+        xc = x0 + (i-ng-0.5)*dx - x_star
+        yc = y0 + (j-ng-0.5)*dx
+        zc = z0 + (k-ng-0.5)*dx
+        r  = sqrt(xc*xc + yc*yc + zc*zc)
+        r <= r_inner && continue
+        b = clamp(floor(Int, r/Δb) + 1, 1, nbin)
+        mbin[b] += ρ * dV
+    end
+    M_env = sum(mbin)
+    M_env <= 0.0 && return r_inner
+    target = frac * M_env
+    acc = 0.0
+    for b in 1:nbin
+        acc += mbin[b]
+        acc >= target && return b * Δb
+    end
+    return rmax
+end
+
+if relax_ic_arg
+    # ---- Roche-potential relaxation IC (CLAUDE.md §6.3).
+    #      A spherical Lane-Emden polytrope is relaxed by velocity damping in
+    #      the binary's CO-ROTATING frame (relax_ic! with Ω = Ω_orb adds the
+    #      centrifugal + Coriolis forces).  Centrifugal support holds the star
+    #      at its orbital position with BH1 fixed, so it settles into the tidal
+    #      (Roche) shape — the L1/L2 bulge the SCF figure lacks — with no
+    #      orbital drift.  The relaxed gas is at rest in the rotating frame;
+    #      the inertial co-rotation velocity is added by the overlay below
+    #      (which assumes synchronization, Ω_spin = Ω_orb).  self_gravity is
+    #      forced on (see SELF_GRAVITY).
+    @info "Building Roche-relaxation IC (Lane-Emden polytrope + velocity damping)..." M_star=round(M_STAR,digits=4) M_core=round(M_BH2_INIT,digits=4) R_star=round(R_STAR,digits=4)
+
+    # Relax the COMPLETE star — the pre-SN star is whole; the core becomes BH2
+    # only at the explosion.  Paint un-hollowed (M_core = 0); the core is carved
+    # out after relaxation, mass-based, from the actual relaxed profile.
+    polytrope_ic_3d!(U_cpu, NX, NY, NZ, DX, DX, DX, GAMMA;
+                     M_star = M_STAR, R_star = R_STAR, M_core = 0.0,
+                     x0 = x0, y0 = y0, z0 = z0,
+                     x_center = x_star_center, y_center = 0.0, z_center = 0.0,
+                     ρ_floor = RHO_FLOOR, P_floor = P_FLOOR)
+    @info "Polytrope painted (full star; core carved mass-based after relaxation)"
+
+    fill_ghost_3d_outflow!(U_cpu, NX, NY, NZ)
+    copyto!(U, U_cpu)
+
+    @info "Relaxing toward Roche equilibrium..." t_damp=relax_t_damp_arg t_max=relax_t_max_arg KE_tol=relax_ke_tol_arg self_gravity=SELF_GRAVITY
+    relax_info = relax_ic!(U, NX, NY, NZ, DX, DX, DX, GAMMA;
+                           bhs = [bh1],
+                           x0 = x0, y0 = y0, z0 = z0,
+                           t_damp  = relax_t_damp_arg,
+                           t_max   = relax_t_max_arg,
+                           cfl     = CFL,
+                           ρ_floor = RHO_FLOOR, P_floor = P_FLOOR,
+                           KE_tol  = relax_ke_tol_arg,
+                           Ω       = Ω_ORB,
+                           self_gravity = SELF_GRAVITY,
+                           verbose = true)
+    @info "Relaxation done" t=round(relax_info.t,digits=3) n_steps=relax_info.n_steps KE_ratio=round(relax_info.KE_ratio,sigdigits=3)
+    relax_info.KE_ratio > 0.05 &&
+        @warn "Relaxation ended with KE/E_th > 5% — star may not be fully settled" KE_ratio=round(relax_info.KE_ratio,sigdigits=3)
+
+    # Overlay rigid rotation on the relaxed (tidally distorted) star.
+    U_cpu = Array(U)
+    Ω_SPIN = spin_omega_frac_arg * Ω_ORB
+    if TIDAL_SYNC
+        apply_stellar_rotation!(U_cpu, GAMMA, Ω_SPIN, v_bh2_y,
+                                x_star_center, 0.0, 0.0,
+                                2.0 * RHO_FLOOR)
+        @info "Stellar rotation applied (overlay on relaxed star)" Ω_spin=round(Ω_SPIN,digits=3) Ω_orb=round(Ω_ORB,digits=3) frac_of_breakup=round(Ω_SPIN/Ω_BRK,digits=3)
+        Ω_SPIN / Ω_BRK > 0.9 && @warn "Requested Ω_spin > 0.9 Ω_brk — overlay is unphysical above breakup"
+    else
+        @info "Stellar rotation DISABLED (--no-spin)"
+    end
+
+    # Carve the core, mass-based: the relaxed star has expanded/distorted, so
+    # the radius enclosing M_BH2_INIT differs from the input polytrope R_CORE.
+    # Find it from the relaxed profile, then hollow r < R_CORE for BH2.
+    R_CORE = radius_for_mass_fraction(U_cpu, M_BH2_INIT / M_STAR, x_star_center,
+                                      0.0, NX, NY, NZ, DX, x0, y0, z0,
+                                      2.0 * RHO_FLOOR)
+    let ng = BinarySupernova.NG
+        @inbounds for k in ng+1:ng+NZ, j in ng+1:ng+NY, i in ng+1:ng+NX
+            xc = x0 + (i - ng - 0.5) * DX - x_star_center
+            yc = y0 + (j - ng - 0.5) * DX
+            zc = z0 + (k - ng - 0.5) * DX
+            if xc*xc + yc*yc + zc*zc < R_CORE^2
+                U_cpu[1, i, j, k] = RHO_FLOOR
+                U_cpu[2, i, j, k] = 0.0
+                U_cpu[3, i, j, k] = 0.0
+                U_cpu[4, i, j, k] = 0.0
+                U_cpu[5, i, j, k] = P_FLOOR / (GAMMA - 1.0)
+            end
+        end
+    end
+    @info "Core carved (mass-based)" r_core=round(R_CORE, digits=4) r_core_over_dx=round(R_CORE/DX, digits=2)
+
+elseif scf_ic_arg
     # ---- Self-consistent rotating polytrope (Hachisu 1986a SCF).
     #      The equilibrium sequence is parameterised by the axis ratio α;
     #      Ω_spin is an *output*, not an input.  Because the SCF surface
@@ -378,31 +576,6 @@ else
                      ρ_floor  = RHO_FLOOR, P_floor = P_FLOOR)
     @info "Polytrope core hollowed" r_core=round(R_CORE, digits=4) r_core_over_dx=round(R_CORE/DX, digits=2)
 
-    # v_gas(r) = v_star + Ω × (r - r_star),   Ω = Ω_spin ẑ,   v_star = (0, v_bh2_y, 0)
-    function apply_stellar_rotation!(U_cpu, γ, Ω, v_star_y,
-                                      x_star, y_star, z_star,
-                                      ρ_thresh)
-        ng = BinarySupernova.NG
-        nxtot, nytot, nztot = size(U_cpu, 2), size(U_cpu, 3), size(U_cpu, 4)
-        nx = nxtot - 2ng;  ny = nytot - 2ng;  nz = nztot - 2ng
-        @inbounds for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
-            ρ = U_cpu[1, i, j, k]
-            ρ <= ρ_thresh && continue
-            xc = x0 + (i - ng - 0.5) * DX - x_star
-            yc = y0 + (j - ng - 0.5) * DX - y_star
-            vx = -Ω * yc
-            vy = v_star_y + Ω * xc
-            vz = 0.0
-            # U[5] currently holds only E_internal (polytrope sets no KE); P = (γ-1)·E_int.
-            P_internal = U_cpu[5, i, j, k] * (γ - 1.0)
-            U_cpu[2, i, j, k] = ρ * vx
-            U_cpu[3, i, j, k] = ρ * vy
-            U_cpu[4, i, j, k] = ρ * vz
-            U_cpu[5, i, j, k] = P_internal / (γ - 1.0) + 0.5 * ρ * (vx^2 + vy^2 + vz^2)
-        end
-        return nothing
-    end
-
     Ω_SPIN = spin_omega_frac_arg * Ω_ORB
     if TIDAL_SYNC
         apply_stellar_rotation!(U_cpu, GAMMA, Ω_SPIN, v_bh2_y,
@@ -419,18 +592,6 @@ fill_ghost_3d_outflow!(U_cpu, NX, NY, NZ)
 copyto!(U, U_cpu)
 
 # ---------------------------------------------------------------------------
-# Step 3: BH1 on CoM-centred circular orbit
-
-bh1 = BlackHole(
-    [x_bh1, 0.0, 0.0],
-    [0.0,   v_bh1_y, 0.0],
-    M_BH1,
-    eps_bh,
-    units.c_code,
-    r_floor)
-@info "BH1" pos=bh1.pos vel=bh1.vel mass=round(bh1.mass,digits=4) r_sink=round(r_sink(bh1),digits=4)
-
-# ---------------------------------------------------------------------------
 # Step 4: thermal bomb + BH2 activation
 
 # Inner cutout for the thermal bomb.  Default: exclude the hollowed core only
@@ -441,11 +602,21 @@ bh1 = BlackHole(
 const R_BOMB_INNER = r_bomb_inner_frac_arg >= 0.0 ?
                      r_bomb_inner_frac_arg * R_STAR : R_CORE
 
-@info "Applying thermal bomb..." E_SN=round(E_SN,sigdigits=4) r_bomb=round(R_BOMB,digits=4) r_bomb_inner=round(R_BOMB_INNER,digits=4) center_x=round(x_star_center,digits=4) bipolar_theta_deg=bipolar_theta_deg_arg
-
 U_cpu = Array(U)
+
+# Bomb outer radius: geometric (r_bomb_outer_frac · R_STAR) by default, or — if
+# --bomb-mass-frac > 0 — the radius enclosing that fraction of the built star's
+# envelope mass (robust to a relaxed star whose extent differs from R_STAR).
+R_BOMB_EFF = bomb_mass_frac_arg > 0.0 ?
+    radius_for_mass_fraction(U_cpu, bomb_mass_frac_arg, x_star_center,
+                                  R_BOMB_INNER, NX, NY, NZ, DX, x0, y0, z0,
+                                  2.0 * RHO_FLOOR) :
+    R_BOMB
+
+@info "Applying thermal bomb..." E_SN=round(E_SN,sigdigits=4) r_bomb=round(R_BOMB_EFF,digits=4) r_bomb_inner=round(R_BOMB_INNER,digits=4) bomb_mass_frac=bomb_mass_frac_arg center_x=round(x_star_center,digits=4) bipolar_theta_deg=bipolar_theta_deg_arg
+
 M_bomb = thermal_bomb!(U_cpu, NX, NY, NZ, DX, DX, DX;
-                       E_SN = E_SN, r_bomb = R_BOMB, r_bomb_inner = R_BOMB_INNER,
+                       E_SN = E_SN, r_bomb = R_BOMB_EFF, r_bomb_inner = R_BOMB_INNER,
                        x0 = x0, y0 = y0, z0 = z0,
                        x_center = x_star_center, y_center = 0.0, z_center = 0.0,
                        bipolar_theta_deg = bipolar_theta_deg_arg)

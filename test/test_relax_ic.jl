@@ -188,4 +188,82 @@
         @test isapprox(dU[5, ng+1, ng+1, ng+1], -2.0, rtol = 1e-12)
     end
 
+    # ------------------------------------------------------------------
+    # Test 6: co-rotating relaxation runs and holds the star in place
+    # ------------------------------------------------------------------
+    @testset "co-rotating relaxation" begin
+        nx = 16;  ny = 16;  nz = 16
+        L = 1.0;  dx = 2L / nx
+        ng = BinarySupernova.NG
+        nxtot = nx + 2ng
+        γ = 5/3
+
+        # CoM-centred binary: star + equal-mass BH, separation a = 1.
+        M_s = 0.5;  M_b = 0.5;  a = 1.0
+        x_star = -M_b * a / (M_s + M_b)        # star CoM-orbital position
+        x_bh1  = +M_s * a / (M_s + M_b)
+        Ω_orb  = sqrt((M_s + M_b) / a^3)       # G = 1
+
+        U = zeros(Float64, 5, nxtot, nxtot, nxtot)
+        polytrope_ic_3d!(U, nx, ny, nz, dx, dx, dx, γ;
+                         M_star = M_s, R_star = 0.3,
+                         x0 = -L, y0 = -L, z0 = -L, x_center = x_star)
+
+        pu  = PhysicalUnits(20.0, 10.0)
+        bh1 = BlackHole(pos = [x_bh1, 0.0, 0.0], vel = [0.0, 0.0, 0.0],
+                        mass = M_b, eps = 0.05, units = pu, r_floor = 0.02)
+
+        com_x(u) = begin
+            s = 0.0;  m = 0.0
+            for k in ng+1:ng+nz, j in ng+1:ng+ny, i in ng+1:ng+nx
+                ρc = u[1, i, j, k]
+                s += ρc * (-L + (i - ng - 0.5) * dx);  m += ρc
+            end
+            s / m
+        end
+        com0 = com_x(U)
+
+        res = relax_ic!(U, nx, ny, nz, dx, dx, dx, γ;
+                        bhs = [bh1], x0 = -L, y0 = -L, z0 = -L,
+                        t_damp = 0.1, t_max = 1.0, KE_tol = 0.0,
+                        Ω = Ω_orb, self_gravity = true)
+
+        @test res.n_steps > 5            # ran a real relaxation (cold-start guard)
+        @test all(isfinite, U)           # stayed numerically sane
+        @test isfinite(res.KE_ratio)
+        # centrifugal support holds the star at its orbital position — the gas
+        # centroid does not run away toward the companion BH.
+        @test abs(com_x(U) - com0) < 0.15 * a
+    end
+
+    # ------------------------------------------------------------------
+    # Test 7: rotating_frame_source! — centrifugal + Coriolis values
+    # ------------------------------------------------------------------
+    @testset "rotating-frame source values" begin
+        nx = 8;  ny = 8;  nz = 8
+        ng = BinarySupernova.NG
+        nxtot = nx + 2ng
+        U  = zeros(Float64, 5, nxtot, nxtot, nxtot)
+        dU = zeros(Float64, 5, nxtot, nxtot, nxtot)
+
+        # uniform ρ = 2 with velocity (vx, vy) = (1, 0) ⇒ mx = 2, my = 0
+        U[1, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz] .= 2.0
+        U[2, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz] .= 2.0
+        U[5, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz] .= 5.0
+
+        Ω = 0.5;  dx = 0.1
+        rotating_frame_source!(dU, U, nx, ny, nz, dx, dx, dx, 0.0, 0.0, 0.0, Ω)
+
+        # first active cell centre: x = y = 0 + 0.5·dx = 0.05
+        i = ng + 1
+        # d(mx)/dt = Ω²ρx + 2Ω my = 0.25·2·0.05 + 0       = 0.025
+        @test isapprox(dU[2, i, i, i],  0.025;  rtol = 1e-12)
+        # d(my)/dt = Ω²ρy − 2Ω mx = 0.25·2·0.05 − 2·0.5·2 = −1.975
+        @test isapprox(dU[3, i, i, i], -1.975;  rtol = 1e-12)
+        # d(E)/dt  = Ω²(x mx + y my) = 0.25·(0.05·2 + 0)  = 0.025
+        @test isapprox(dU[5, i, i, i],  0.025;  rtol = 1e-12)
+        # no z-component
+        @test isapprox(dU[4, i, i, i],  0.0;    atol = 1e-14)
+    end
+
 end
