@@ -78,3 +78,60 @@ end
     @test meta.t == 0.0
     @test meta.step == 0
 end
+
+# Uniform single-grid checkpoint (run_sn50_fiducial.jl driver): full ghosted
+# U + BHs + the time-loop resume scalars (t, step, t_snap, t_bh2_sink_on).
+@testset "Uniform checkpoint round-trip: U + BHs + meta" begin
+    γ = 4/3
+    ng = BinarySupernova.NG
+    nx, ny, nz = 6, 6, 6
+    dx = 0.2
+    U = zeros(Float64, 5, nx+2ng, ny+2ng, nz+2ng)
+    for i in eachindex(U)        # deterministic, distinct values incl. ghosts
+        U[i] = 0.5 + 1.0e-3 * i
+    end
+
+    units = PhysicalUnits(20.0, 10.0)
+    bh1 = BlackHole(pos=[-0.3, 0.0, 0.0],   vel=[0.0,  -0.7, 0.0],
+                    mass=0.6, eps=2e-3, units=units, r_floor=2e-3)
+    bh2 = BlackHole(pos=[+0.3, 0.05, -0.1], vel=[0.01, +0.7, 0.0],
+                    mass=0.4, eps=2e-3, units=units, r_floor=2e-3)
+    bhs = [bh1, bh2]
+
+    path = joinpath(mktempdir(), "ckpt_uniform.h5")
+    save_checkpoint_uniform(path, U, bhs;
+        t=7.5, step=12345, dt_last=2.5e-3, t_snap=8.0, t_bh2_sink_on=5.0,
+        nx=nx, ny=ny, nz=nz, dx=dx, dy=dx, dz=dx, γ=γ,
+        x0=-1.0, y0=-1.0, z0=-1.0, ρ_floor=3e-4, P_floor=1e-5)
+
+    U2, bhs2, grid, meta = load_checkpoint_uniform(path)
+
+    @test size(U2) == size(U)
+    @test U2 == U                                  # bit-for-bit incl. ghosts
+    @test meta.t == 7.5
+    @test meta.step == 12345
+    @test meta.dt_last == 2.5e-3
+    @test meta.t_snap == 8.0
+    @test meta.t_bh2_sink_on == 5.0
+    @test meta.format_version == CHECKPOINT_FORMAT_VERSION
+
+    @test (grid.nx, grid.ny, grid.nz) == (nx, ny, nz)
+    @test grid.dx == dx
+    @test grid.γ == γ
+    @test (grid.x0, grid.y0, grid.z0) == (-1.0, -1.0, -1.0)
+    @test grid.ρ_floor == 3e-4
+    @test grid.P_floor == 1e-5
+
+    @test length(bhs2) == 2
+    for (b, b2) in zip(bhs, bhs2)
+        @test b2.pos     == b.pos
+        @test b2.vel     == b.vel
+        @test b2.mass    == b.mass
+        @test b2.eps     == b.eps
+        @test b2.c_code  == b.c_code
+        @test b2.r_floor == b.r_floor
+    end
+
+    # The two checkpoint kinds are not cross-loadable.
+    @test_throws Exception load_checkpoint(path)            # FMR loader on uniform file
+end

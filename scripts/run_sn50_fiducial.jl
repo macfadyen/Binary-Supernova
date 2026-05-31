@@ -54,6 +54,35 @@ outdir_arg = let v = "demo1/output_sn50_fiducial"
     end
     v
 end
+# Checkpoint/restart (for PBS walltime-capped runs; see scripts/run_relax_optimal.pbs).
+# --restart PATH        resume from a uniform checkpoint, skipping the IC build.
+# --checkpoint-every-min M  write OUTDIR/chkpt.h5 every M wall-minutes (0 = off).
+# --wall-budget-min M       checkpoint and exit(2) once M wall-minutes elapse, so
+#                           the batch script can auto-resubmit (0 = run to t_end).
+restart_arg = let v = ""
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--restart" && i < length(ARGS)
+            v = ARGS[i+1]
+        end
+    end
+    v
+end
+checkpoint_every_min_arg = let v = 0.0
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--checkpoint-every-min" && i < length(ARGS)
+            v = parse(Float64, ARGS[i+1])
+        end
+    end
+    v
+end
+wall_budget_min_arg = let v = 0.0
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--wall-budget-min" && i < length(ARGS)
+            v = parse(Float64, ARGS[i+1])
+        end
+    end
+    v
+end
 L_arg = let v = 4.0
     for (i, arg) in enumerate(ARGS)
         if arg == "--L" && i < length(ARGS)
@@ -318,6 +347,16 @@ const DT_SNAP = dt_snap_arg
 const OUTDIR  = outdir_arg
 const NX      = nx_arg
 
+# Checkpoint/restart configuration.
+const RESTART_PATH         = restart_arg
+const RESTARTING           = !isempty(RESTART_PATH) && isfile(RESTART_PATH)
+const CHECKPOINT_EVERY_MIN = checkpoint_every_min_arg
+const WALL_BUDGET_MIN      = wall_budget_min_arg
+const CHKPT_PATH           = joinpath(OUTDIR, "chkpt.h5")
+if !isempty(RESTART_PATH) && !RESTARTING
+    @warn "--restart path not found; starting fresh" RESTART_PATH
+end
+
 # ---------------------------------------------------------------------------
 # Backend
 
@@ -459,6 +498,11 @@ function radius_for_mass_fraction(U_cpu, frac, x_star, r_inner,
     return rmax
 end
 
+# --- Initial conditions.  On restart the entire IC build (polytrope,
+#     relaxation, thermal bomb, BH2 activation) is SKIPPED and the evolved
+#     state is loaded from the checkpoint instead — re-running the relaxation
+#     on every PBS resubmit would defeat the checkpoint's purpose.
+if !RESTARTING
 if relax_ic_arg
     # ---- Roche-potential relaxation IC (CLAUDE.md §6.3).
     #      A spherical Lane-Emden polytrope is relaxed by velocity damping in
@@ -599,8 +643,8 @@ copyto!(U, U_cpu)
 # region").  With `--r-bomb-inner-frac FRAC` > 0, the cutoff is pushed out to
 # FRAC · R_STAR so only the outer envelope is shocked — inner layers retain
 # their pre-SN tidal-sync velocity as high-AM fallback.
-const R_BOMB_INNER = r_bomb_inner_frac_arg >= 0.0 ?
-                     r_bomb_inner_frac_arg * R_STAR : R_CORE
+R_BOMB_INNER = r_bomb_inner_frac_arg >= 0.0 ?
+               r_bomb_inner_frac_arg * R_STAR : R_CORE
 
 U_cpu = Array(U)
 
@@ -639,10 +683,37 @@ bhs = BlackHole[bh1, bh2]
 # before sinks turn on, so we don't accrete the cold envelope material that
 # starts inside r_sink at IC.  Default = 2 · r_sink / c_s_post_bomb where
 # c_s² = γ(γ-1) · E_SN/M_bomb (specific thermal energy in the bombed shell).
-const C_S_POST_BOMB = sqrt(GAMMA * (GAMMA - 1.0) * E_SN / M_bomb)
-const T_BH2_SINK_ON = bh2_sink_delay_arg >= 0.0 ? bh2_sink_delay_arg :
-                      2.0 * r_sink(bh2) / C_S_POST_BOMB
-@info "BH2 sink delay" t_activate=round(T_BH2_SINK_ON, sigdigits=3) c_s_post_bomb=round(C_S_POST_BOMB, sigdigits=3) frac_of_P0=round(T_BH2_SINK_ON/(2π), sigdigits=3)
+    c_s_post_bomb = sqrt(GAMMA * (GAMMA - 1.0) * E_SN / M_bomb)
+    t_bh2_sink_on_val = bh2_sink_delay_arg >= 0.0 ? bh2_sink_delay_arg :
+                        2.0 * r_sink(bh2) / c_s_post_bomb
+    @info "BH2 sink delay" t_activate=round(t_bh2_sink_on_val, sigdigits=3) c_s_post_bomb=round(c_s_post_bomb, sigdigits=3) frac_of_P0=round(t_bh2_sink_on_val/(2π), sigdigits=3)
+
+    t0      = 0.0
+    n_step0 = 0
+    t_snap0 = DT_SNAP
+else
+    # ---- Restart: load the evolved uniform state; the IC build above is skipped.
+    @info "Restarting from checkpoint (IC build skipped)" path=RESTART_PATH
+    U_load, bhs_load, grid_load, meta_load = load_checkpoint_uniform(RESTART_PATH)
+    (grid_load.nx == NX && grid_load.ny == NY && grid_load.nz == NZ) ||
+        error("checkpoint grid $(grid_load.nx)×$(grid_load.ny)×$(grid_load.nz) ≠ run grid $(NX)×$(NY)×$(NZ)")
+    isapprox(grid_load.dx, DX; rtol = 1e-9) ||
+        error("checkpoint dx=$(grid_load.dx) ≠ run dx=$(DX) — different --L?")
+    size(U_load) == size(U) ||
+        error("checkpoint U shape $(size(U_load)) ≠ allocated $(size(U))")
+    copyto!(U, U_load)
+    bhs = bhs_load
+    t_bh2_sink_on_val = meta_load.t_bh2_sink_on
+    t0      = meta_load.t
+    n_step0 = Int(meta_load.step)
+    t_snap0 = meta_load.t_snap
+    @info "Restart state loaded" t=round(t0, digits=4) step=n_step0 n_bhs=length(bhs) M_BH1=round(bhs[1].mass, digits=5) M_BH2=round(bhs[2].mass, digits=5)
+end
+
+# Sink-activation time — derived from M_bomb (fresh) or carried in the
+# checkpoint (restart).  Const so coupled_step!'s `t < T_BH2_SINK_ON` gate
+# stays type-stable in the hot loop.
+const T_BH2_SINK_ON = t_bh2_sink_on_val
 
 # ---------------------------------------------------------------------------
 # Scratch buffers
@@ -658,19 +729,24 @@ Un = similar(U)
 
 mkpath(OUTDIR)
 traj_file = joinpath(OUTDIR, "trajectory.h5")
-init_trajectory_file(traj_file, 2)
-
 diag_file = joinpath(OUTDIR, "diagnostics.csv")
-open(diag_file, "w") do f
-    println(f, "t,Mdot1,Mdot2,M_BH1,M_BH2,r_sep," *
-               "E_gas,Jz_gas,M_bound," *
-               "Fgx1,Fgy1,Fgz1,Fgx2,Fgy2,Fgz2")
-end
-
 snap_path(idx) = joinpath(OUTDIR, @sprintf("snap_t%03d.h5", idx))
-write_snapshot(snap_path(0), Array(U), NX, NY, NZ, DX, DX, DX, 0.0, GAMMA)
-append_trajectory(traj_file, 0.0, bhs)
-@info "Snapshot 0 written"
+
+if !RESTARTING
+    init_trajectory_file(traj_file, 2)
+    open(diag_file, "w") do f
+        println(f, "t,Mdot1,Mdot2,M_BH1,M_BH2,r_sep," *
+                   "E_gas,Jz_gas,M_bound," *
+                   "Fgx1,Fgy1,Fgz1,Fgx2,Fgy2,Fgz2")
+    end
+    write_snapshot(snap_path(0), Array(U), NX, NY, NZ, DX, DX, DX, 0.0, GAMMA)
+    append_trajectory(traj_file, 0.0, bhs)
+    @info "Snapshot 0 written"
+else
+    # Restart appends to the existing trajectory.h5 / diagnostics.csv; the
+    # snapshots already on disk up to t0 are kept.
+    @info "Restart — appending to existing trajectory.h5 / diagnostics.csv" from_t=round(t0, digits=4)
+end
 
 # ---------------------------------------------------------------------------
 # Coupled SSP-RK3 step: live orbit + torque-free sinks + density-threshold
@@ -747,10 +823,27 @@ end
 t_wall = time()
 
 function run_evolution!(U, Un, dU, Fx, Fy, Fz, bhs,
-                         traj_file, diag_file, snap_path, torque_free)
-    t      = 0.0
-    n_step = 0
-    t_snap = DT_SNAP
+                         traj_file, diag_file, snap_path, torque_free,
+                         t0, n_step0, t_snap0, t_wall0;
+                         checkpoint_every_min = 0.0, wall_budget_min = 0.0)
+    t      = t0
+    n_step = n_step0
+    t_snap = t_snap0
+    dt     = 0.0
+    last_ckpt_wall = time()
+
+    # Atomic checkpoint write: serialise to a temp file then rename, so a
+    # SIGKILL mid-write can never corrupt the live chkpt.h5 a resubmit reads.
+    function do_checkpoint(t, n_step, dt_last, t_snap)
+        tmp = CHKPT_PATH * ".tmp"
+        save_checkpoint_uniform(tmp, Array(U), bhs;
+            t = t, step = n_step, dt_last = dt_last, t_snap = t_snap,
+            t_bh2_sink_on = T_BH2_SINK_ON,
+            nx = NX, ny = NY, nz = NZ, dx = DX, dy = DX, dz = DX, γ = GAMMA,
+            x0 = x0, y0 = y0, z0 = z0, ρ_floor = RHO_FLOOR, P_floor = P_FLOOR)
+        mv(tmp, CHKPT_PATH; force = true)
+        @info "Checkpoint written" path=CHKPT_PATH t=round(t, digits=4) step=n_step wall_sec=round(time()-t_wall0, digits=1)
+    end
 
     while t < T_END - 1e-12
         dt = cfl_dt_3d(U, NX, NY, NZ, DX, DX, DX, GAMMA, CFL)
@@ -798,15 +891,50 @@ function run_evolution!(U, Un, dU, Fx, Fy, Fz, bhs,
             wall = round(time() - t_wall, digits=1)
             @info "Progress" step=n_step t=round(t,digits=3) dt_code=round(dt,sigdigits=3) wall_sec=wall
         end
+
+        # Periodic checkpoint on a wall-clock cadence.
+        if checkpoint_every_min > 0.0 && (time() - last_ckpt_wall) >= checkpoint_every_min * 60
+            do_checkpoint(t, n_step, dt, t_snap)
+            last_ckpt_wall = time()
+        end
+
+        # Graceful wall-budget exit: checkpoint and stop before PBS SIGKILLs
+        # the job, so the batch script can auto-resubmit from chkpt.h5.
+        if wall_budget_min > 0.0 && (time() - t_wall0) >= wall_budget_min * 60
+            @info "Wall budget reached — checkpointing and exiting for resubmit" budget_min=wall_budget_min t=round(t, digits=4)
+            do_checkpoint(t, n_step, dt, t_snap)
+            return t, n_step, false   # incomplete → driver exits 2
+        end
     end
-    return t, n_step
+
+    # Reached t_end.  Only when checkpointing is enabled, leave a final
+    # checkpoint so a stray resubmit is a clean no-op (loads t≈t_end, exits at
+    # once); runs without --checkpoint-every-min/--wall-budget-min are unchanged.
+    if checkpoint_every_min > 0.0 || wall_budget_min > 0.0
+        do_checkpoint(t, n_step, dt, t_snap)
+    end
+    return t, n_step, true
 end
 
-t_final, n_steps = run_evolution!(U, Un, dU, Fx, Fy, Fz, bhs,
-                                   traj_file, diag_file, snap_path, torque_free)
+t_final, n_steps, completed = run_evolution!(U, Un, dU, Fx, Fy, Fz, bhs,
+                                   traj_file, diag_file, snap_path, torque_free,
+                                   t0, n_step0, t_snap0, t_wall;
+                                   checkpoint_every_min = CHECKPOINT_EVERY_MIN,
+                                   wall_budget_min = WALL_BUDGET_MIN)
 
 t_elapsed = time() - t_wall
 Mcell_per_sec = n_steps * NX * NY * NZ / t_elapsed / 1e6
 @info "Done" n_steps=n_steps t_final=round(t_final,digits=4) wall_sec=round(t_elapsed,digits=1) Mcell_per_s=round(Mcell_per_sec,digits=1)
 @info "BH accretion" M_BH1_final=round(bhs[1].mass,digits=4) M_BH2_final=round(bhs[2].mass,digits=4) ΔM_BH1=round(bhs[1].mass-M_BH1,digits=4) ΔM_BH2=round(bhs[2].mass-M_BH2_INIT,digits=4)
 @info "Outputs" traj=traj_file diag=diag_file snapshots=OUTDIR
+
+if completed
+    # Completion sentinel for the PBS auto-resubmit chain (rc=0 + done.marker).
+    open(joinpath(OUTDIR, "done.marker"), "w") do f
+        println(f, "t_final=", t_final, " n_steps=", n_steps)
+    end
+    @info "Run complete — reached t_end" t_final=round(t_final, digits=4)
+else
+    @info "Run incomplete (wall-budget exit) — resubmit to continue from checkpoint" chkpt=CHKPT_PATH
+    exit(2)
+end

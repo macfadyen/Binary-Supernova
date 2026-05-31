@@ -183,3 +183,136 @@ function _read_level(grp)
     copyto!(lvl.U, U)
     return lvl
 end
+
+# ---------------------------------------------------------------------------
+# Uniform single-grid checkpoint (run_sn50_fiducial.jl driver).
+#
+# The production SN driver evolves a single uniform conserved array `U`
+# (NQ, nx+2NG, ny+2NG, nz+2NG) rather than an FMRGrid3D, so it needs its own
+# checkpoint.  We serialise the full ghosted `U`, the BH list, and the scalars
+# the time loop needs to resume bit-faithfully (t, step, t_snap, dt_last) plus
+# t_bh2_sink_on — the sink-activation time is derived from M_bomb in the IC
+# block, which is skipped on restart, so it must be carried across.
+
+function _write_bhs(parent, bhs::Vector{BlackHole})
+    b = HDF5.create_group(parent, "bhs")
+    n = length(bhs)
+    HDF5.attrs(b)["n"] = Int64(n)
+    if n > 0
+        pos     = zeros(Float64, 3, n);  vel     = zeros(Float64, 3, n)
+        mass    = zeros(Float64, n);     eps_arr = zeros(Float64, n)
+        c_code  = zeros(Float64, n);     r_floor = zeros(Float64, n)
+        for (i, bh) in enumerate(bhs)
+            pos[:, i] .= bh.pos;  vel[:, i] .= bh.vel
+            mass[i] = bh.mass;    eps_arr[i] = bh.eps
+            c_code[i] = bh.c_code;  r_floor[i] = bh.r_floor
+        end
+        b["pos"] = pos;  b["vel"] = vel;  b["mass"] = mass
+        b["eps"] = eps_arr;  b["c_code"] = c_code;  b["r_floor"] = r_floor
+    end
+    return b
+end
+
+function _read_bhs(parent)
+    b = parent["bhs"]
+    n = Int(HDF5.read_attribute(b, "n"))
+    bhs = BlackHole[]
+    if n > 0
+        pos = read(b["pos"]);  vel = read(b["vel"]);  mass = read(b["mass"])
+        eps_arr = read(b["eps"]);  c_code = read(b["c_code"])
+        r_floor_arr = read(b["r_floor"])
+        for i in 1:n
+            push!(bhs, BlackHole(Vector{Float64}(pos[:, i]),
+                                 Vector{Float64}(vel[:, i]),
+                                 mass[i], eps_arr[i], c_code[i], r_floor_arr[i]))
+        end
+    end
+    return bhs
+end
+
+"""
+    save_checkpoint_uniform(path, U_host, bhs; t, step, dt_last, t_snap,
+                            t_bh2_sink_on, nx, ny, nz, dx, dy, dz, γ,
+                            x0, y0, z0, ρ_floor, P_floor)
+
+Checkpoint a uniform single-grid driver state.  `U_host` is the full conserved
+array including ghosts (any AbstractArray; copied to host).  Companion to
+[`load_checkpoint_uniform`](@ref).  Atomic writes are the caller's job (write
+to a temp path, then `mv`).  Distinct from [`save_checkpoint`](@ref), which
+serialises an FMRGrid3D.
+"""
+function save_checkpoint_uniform(path::AbstractString,
+                                 U_host::AbstractArray,
+                                 bhs::Vector{BlackHole};
+                                 t::Real, step::Integer, dt_last::Real,
+                                 t_snap::Real, t_bh2_sink_on::Real,
+                                 nx::Integer, ny::Integer, nz::Integer,
+                                 dx::Real, dy::Real, dz::Real, γ::Real,
+                                 x0::Real, y0::Real, z0::Real,
+                                 ρ_floor::Real, P_floor::Real)
+    HDF5.h5open(path, "w") do f
+        m = HDF5.create_group(f, "manifest")
+        HDF5.attrs(m)["format_version"] = CHECKPOINT_FORMAT_VERSION
+        HDF5.attrs(m)["kind"]           = "uniform"
+        HDF5.attrs(m)["t"]              = Float64(t)
+        HDF5.attrs(m)["step"]           = Int64(step)
+        HDF5.attrs(m)["dt_last"]        = Float64(dt_last)
+        HDF5.attrs(m)["t_snap"]         = Float64(t_snap)
+        HDF5.attrs(m)["t_bh2_sink_on"]  = Float64(t_bh2_sink_on)
+
+        g = HDF5.create_group(f, "grid")
+        HDF5.attrs(g)["nx"] = Int64(nx);  HDF5.attrs(g)["ny"] = Int64(ny)
+        HDF5.attrs(g)["nz"] = Int64(nz)
+        HDF5.attrs(g)["dx"] = Float64(dx);  HDF5.attrs(g)["dy"] = Float64(dy)
+        HDF5.attrs(g)["dz"] = Float64(dz);  HDF5.attrs(g)["gamma"] = Float64(γ)
+        HDF5.attrs(g)["x0"] = Float64(x0);  HDF5.attrs(g)["y0"] = Float64(y0)
+        HDF5.attrs(g)["z0"] = Float64(z0)
+        HDF5.attrs(g)["rho_floor"] = Float64(ρ_floor)
+        HDF5.attrs(g)["P_floor"]   = Float64(P_floor)
+        g["U"] = Array(U_host)   # device → host if U is a GPU array
+
+        _write_bhs(f, bhs)
+    end
+    return path
+end
+
+"""
+    load_checkpoint_uniform(path) -> (U, bhs, grid, meta)
+
+Read a checkpoint written by [`save_checkpoint_uniform`](@ref).  Returns the
+host conserved array `U`, the BH list, a `grid` NamedTuple
+`(; nx, ny, nz, dx, dy, dz, γ, x0, y0, z0, ρ_floor, P_floor)`, and a `meta`
+NamedTuple `(; t, step, dt_last, t_snap, t_bh2_sink_on, format_version)`.
+"""
+function load_checkpoint_uniform(path::AbstractString)
+    HDF5.h5open(path, "r") do f
+        m  = f["manifest"]
+        fv = HDF5.read_attribute(m, "format_version")
+        fv == CHECKPOINT_FORMAT_VERSION || error(
+            "checkpoint format_version=$fv, expected $CHECKPOINT_FORMAT_VERSION")
+        haskey(HDF5.attrs(m), "kind") && HDF5.read_attribute(m, "kind") == "uniform" ||
+            error("$path is not a uniform-grid checkpoint (kind ≠ \"uniform\")")
+        t             = HDF5.read_attribute(m, "t")
+        step          = HDF5.read_attribute(m, "step")
+        dt_last       = HDF5.read_attribute(m, "dt_last")
+        t_snap        = HDF5.read_attribute(m, "t_snap")
+        t_bh2_sink_on = HDF5.read_attribute(m, "t_bh2_sink_on")
+
+        g = f["grid"]
+        nx = Int(HDF5.read_attribute(g, "nx"));  ny = Int(HDF5.read_attribute(g, "ny"))
+        nz = Int(HDF5.read_attribute(g, "nz"))
+        dx = HDF5.read_attribute(g, "dx");  dy = HDF5.read_attribute(g, "dy")
+        dz = HDF5.read_attribute(g, "dz");  γ  = HDF5.read_attribute(g, "gamma")
+        x0 = HDF5.read_attribute(g, "x0");  y0 = HDF5.read_attribute(g, "y0")
+        z0 = HDF5.read_attribute(g, "z0")
+        ρ_floor = HDF5.read_attribute(g, "rho_floor")
+        P_floor = HDF5.read_attribute(g, "P_floor")
+        U = read(g["U"])
+
+        bhs = _read_bhs(f)
+
+        grid = (; nx, ny, nz, dx, dy, dz, γ, x0, y0, z0, ρ_floor, P_floor)
+        meta = (; t, step, dt_last, t_snap, t_bh2_sink_on, format_version = fv)
+        return U, bhs, grid, meta
+    end
+end

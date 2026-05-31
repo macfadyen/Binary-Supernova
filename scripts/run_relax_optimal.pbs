@@ -22,16 +22,20 @@
 #     hpc_sdk from LD_LIBRARY_PATH
 #   - JULIA_DEPOT_PATH + a manually-installed Julia under /nobackup/$USER
 #
-# NOTE — run_sn50_fiducial.jl has NO restart wiring (save/load_checkpoint exist
-# in src/ but the driver does not call them), so the whole t_end run must finish
-# inside ONE walltime.  PROBE FIRST to size it:
-#     qsub -q devel -l walltime=00:45:00 -v T_END=2,DT_SNAP=2 scripts/run_relax_optimal.pbs
-#   read Mcell/s + wall_sec from the tail of the log, extrapolate to t_end=20,
-#   and confirm it fits 24 h before the full submit below.  If it does not,
-#   wire --restart/--checkpoint-every into the driver (the grmhd auto-resubmit
-#   pattern) rather than just bumping walltime.
+# CHECKPOINT / AUTO-RESUBMIT — run_sn50_fiducial.jl checkpoints on a wall-clock
+# cadence (--checkpoint-every-min) and, WALL_BUDGET_MIN before the PBS cap,
+# writes a final checkpoint and exits rc=2.  This script then auto-resubmits
+# itself, and the resubmitted job auto-detects $OUTDIR/chkpt.h5 and resumes
+# (the IC build — including the relaxation — is skipped on restart).  So a
+# t_end=20 run that exceeds 24 h chains across as many jobs as needed; no run
+# is lost to the walltime cap.  (grmhd pattern — see ../grmhd pbs_collapsar.)
 #
-# Full run:
+# PROBE FIRST to size wall + confirm the GPU path:
+#     qsub -q devel -l walltime=00:45:00 -v T_END=2,DT_SNAP=2,WALL_BUDGET_MIN=40 \
+#          scripts/run_relax_optimal.pbs
+#   read Mcell/s + wall_sec from the log tail; extrapolate to t_end=20.
+#
+# Full run (auto-chains until t_end):
 #     qsub scripts/run_relax_optimal.pbs                 # NX=384, t_end=20
 #     qsub -v NX=512 scripts/run_relax_optimal.pbs
 #
@@ -66,14 +70,29 @@ NX=${NX:-384}
 T_END=${T_END:-20.0}
 DT_SNAP=${DT_SNAP:-0.5}
 RELAX_T_MAX=${RELAX_T_MAX:-3.0}
+# Checkpoint cadence + graceful wall-budget exit.  WALL_BUDGET_MIN is set ~20
+# min under the 24 h cap to leave time for the final ~2 GB checkpoint write
+# (device→host + HDF5) and the resubmit qsub before PBS SIGKILLs the job.
+CHECKPOINT_EVERY_MIN=${CHECKPOINT_EVERY_MIN:-120}
+WALL_BUDGET_MIN=${WALL_BUDGET_MIN:-1420}
 
 TAG="relax_optimal_a${A0_RSUN/./}rsun_L${L%.*}_bh${M_BH1_MSUN}_${M_BH2_MSUN}_esn${E_SN_FRAC/./}_bombmf${BOMB_MASS_FRAC/./}_kick${V_KICK_Y/-/m}_nx${NX}"
 OUTDIR=${OUTDIR:-demo1/output_${TAG}}
 mkdir -p "$OUTDIR"
 
+# Resume if a checkpoint from a prior (wall-budget-truncated) job exists.
+RESTART_ARGS=()
+if [[ -f "$OUTDIR/chkpt.h5" ]]; then
+  RESTART_ARGS=(--restart "$OUTDIR/chkpt.h5")
+  echo "[$(date -Is)] resuming from $OUTDIR/chkpt.h5 (IC build will be skipped)"
+else
+  echo "[$(date -Is)] no checkpoint at $OUTDIR/chkpt.h5 — fresh start"
+fi
+
 echo "=========================================================="
 echo "[$(date -Is)] relax-optimal A100 run on $(hostname)"
 echo "  NX=$NX  L=$L  a₀=$A0_RSUN R☉  t_end=$T_END  relax_t_max=$RELAX_T_MAX"
+echo "  checkpoint_every=${CHECKPOINT_EVERY_MIN}min  wall_budget=${WALL_BUDGET_MIN}min"
 echo "  OUTDIR=$OUTDIR"
 echo "=========================================================="
 nvidia-smi -L || true
@@ -83,6 +102,8 @@ julia --project=. -e 'using BinarySupernova; import CUDA; @assert CUDA.functiona
   || { echo ">>> precompile/CUDA FAILED — aborting"; exit 1; }
 
 echo ">> run…"
+# Capture rc without `set -e` aborting on the rc=2 wall-budget exit.
+RC=0
 julia --project=. -t 16 scripts/run_sn50_fiducial.jl \
     --m-bh1-msun  "$M_BH1_MSUN" \
     --m-star-msun "$M_STAR_MSUN" \
@@ -101,11 +122,23 @@ julia --project=. -t 16 scripts/run_sn50_fiducial.jl \
     --nx     "$NX" \
     --t-end  "$T_END" \
     --dt-snap "$DT_SNAP" \
+    --checkpoint-every-min "$CHECKPOINT_EVERY_MIN" \
+    --wall-budget-min      "$WALL_BUDGET_MIN" \
     --outdir "$OUTDIR" \
-    --gpu
-RC=$?
+    "${RESTART_ARGS[@]}" \
+    --gpu || RC=$?
 echo "[$(date -Is)] run exited rc=$RC"
 
+# rc=2 → wall-budget exit with a fresh checkpoint: auto-resubmit to continue.
+if [[ $RC -eq 2 ]]; then
+  echo "[$(date -Is)] wall-budget exit — auto-resubmitting to continue from checkpoint"
+  cd "${PBS_O_WORKDIR:-$(pwd)}"
+  qsub -v NX="$NX",T_END="$T_END",DT_SNAP="$DT_SNAP",RELAX_T_MAX="$RELAX_T_MAX",CHECKPOINT_EVERY_MIN="$CHECKPOINT_EVERY_MIN",WALL_BUDGET_MIN="$WALL_BUDGET_MIN",OUTDIR="$OUTDIR" \
+       scripts/run_relax_optimal.pbs
+  exit 0   # this job's part is done; the chained job carries on
+fi
+
+# rc=0 → reached t_end: run CBD diagnostics.
 if [[ $RC -eq 0 ]]; then
   echo ">> analyze (CBD diagnostics)…"
   julia --project=. scripts/plot_sn50_cbd.jl "$OUTDIR" \

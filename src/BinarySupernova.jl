@@ -251,6 +251,7 @@ include("checkpoint.jl")
 include("orbit_analysis.jl")
 
 export save_checkpoint, load_checkpoint, CHECKPOINT_FORMAT_VERSION
+export save_checkpoint_uniform, load_checkpoint_uniform
 export orbit_elements, orbit_elements_from_trajectory
 export orbit_elements_from_csv, parse_run_csv
 
