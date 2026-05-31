@@ -90,10 +90,12 @@ function add_self_gravity_source!(dU, U,
     ng = NG
     fdx = Float64(dx);  fdy = Float64(dy);  fdz = Float64(dz)
 
-    # Extract active-cell density (stays on the same device as U).
-    ρ_act = view(U, 1, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz)
-    # solve_poisson_isolated needs a contiguous array
-    ρ_cont = collect(ρ_act)
+    # Active-cell density as a contiguous array on U's own device.  A plain
+    # getindex slice (scalar q + ranges) materialises a fresh 3D array on the
+    # same backend — NOT collect(), which copies a CuArray to the HOST and so
+    # would run the Poisson FFT on the CPU and hand a host Φ to the GPU kernel
+    # below (host/device mismatch — the GPU self-gravity path never ran).
+    ρ_cont = U[1, ng+1:ng+nx, ng+1:ng+ny, ng+1:ng+nz]
     Φ = solve_poisson_isolated(ρ_cont, nx, ny, nz, fdx, fdy, fdz)
 
     # Apply ∇Φ source terms via KA kernel (GPU/CPU portable).
