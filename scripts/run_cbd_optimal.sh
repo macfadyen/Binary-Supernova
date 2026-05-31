@@ -7,14 +7,15 @@
 #   - inner-half deposition                                (outer envelope shock-driven)
 #   - Blaauw-safe mass partition (ΔM/M_preSN ≈ 0.22)      (binary stays bound)
 #   - small prograde tangential kick                       (widens apastron, periastron at r_0)
-#   - SCF α = 0.72                                         (Ω_spin/Ω_orb ≈ 1.5; near breakup)
+#   - SCF α = 0.72                                         (Ω_spin/Ω_orb ≈ 3.7 = 0.87 Ω_brk)
 #   - sink delay = 5 code-t                                (gas rearranges before BH2 eats)
 #
 # Resolution requirement is set by the inner-half shell thickness
 #   shell ≈ (0.5 - r_core/R_star) · R_star/a₀
-# At a₀=3 R☉ with M_BH2/M_star = 0.67 (n=3 polytrope: r_core/R_star ≈ 0.42):
-#   shell = (0.5 - 0.42) · 0.333 ≈ 0.027 code
-# Need shell/dx ≥ 2.5 cells → NX ≥ 380 at L=2.
+# At a₀=2.5 R☉ with M_BH2/M_star = 0.67 (SCF rotating polytrope, α=0.72:
+# r_core/R_star ≈ 0.26 — verified by scripts/predict_disk.jl):
+#   shell = (0.5 - 0.26) · 0.400 ≈ 0.096 code
+# Need shell/dx ≥ 2.5 cells → NX ≥ 105 at L=2 (NX=384 default: ample margin).
 #
 # Usage:
 #   scripts/run_cbd_optimal.sh                # default NX=384, GPU
@@ -49,9 +50,9 @@ done
 M_BH1_MSUN=15
 M_STAR_MSUN=30
 M_BH2_MSUN=20             # ΔM = 10 M☉, ΔM/M_preSN = 10/45 = 0.22 (Blaauw-safe)
-A0_RSUN=3.0
+A0_RSUN=2.5              # in L2-spill window 2.3-2.8 R☉ (predict_disk.jl --scan-a0)
 L=2.0                     # ±2 a₀ box
-ALPHA=0.72                # SCF axis ratio → Ω_spin/Ω_orb ≈ 1.5
+ALPHA=0.72                # SCF axis ratio → Ω_spin/Ω_orb ≈ 3.7 (0.87 Ω_brk, CHE-class)
 E_SN_FRAC=0.05            # 5 × 10⁴⁹ erg
 BOMB_OUTER=0.5            # inner-half deposition (r_core < r < R_star/2)
 BIPOLAR_DEG=20            # narrow polar cones, axis along z (= spin axis)
@@ -67,7 +68,7 @@ if [[ "$USE_GPU" == "1" ]]; then
 fi
 
 # ---------- output dir
-TAG="cbd_optimal_a${A0_RSUN%.*}rsun_bh${M_BH1_MSUN}_${M_BH2_MSUN}_alpha${ALPHA/./}_bipolar${BIPOLAR_DEG}_innerhalf_esn${E_SN_FRAC/./}_kick${V_KICK_Y/-/m}_nx${NX}"
+TAG="cbd_optimal_a${A0_RSUN/./}rsun_bh${M_BH1_MSUN}_${M_BH2_MSUN}_alpha${ALPHA/./}_bipolar${BIPOLAR_DEG}_innerhalf_esn${E_SN_FRAC/./}_kick${V_KICK_Y/-/m}_nx${NX}"
 OUTDIR="demo1/output_${TAG}"
 mkdir -p "$OUTDIR"
 
