@@ -1,0 +1,115 @@
+#!/bin/bash
+#PBS -N bsn_relax_optimal
+#PBS -S /bin/bash
+#PBS -q gpu_normal
+#PBS -W group_list=s1994
+#PBS -l select=1:ncpus=16:mem=64gb:ngpus=1:model=mil_a100
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -o logs/
+#
+# scripts/run_relax_optimal.pbs — Cabeus single-A100 launch of the co-rotating
+# Roche-relaxation CBD run (the PBS analogue of scripts/run_relax_optimal.sh).
+#
+# Builds a genuinely tidally-distorted (Roche) progenitor via relax_ic! in the
+# binary's co-rotating frame, then explodes it; the L=6 box holds the post-SN
+# widened binary + the R>2 r_sep circumbinary region the earlier L=2/NX=96 run
+# could not see.  See memory project_predict_disk.md.
+#
+# Cabeus conventions mirrored from ../CBDRadMHD/scripts/run_ring_probe.pbs:
+#   - queue gpu_normal (24 h cap), group s1994, model=mil_a100 (A100-SXM4-80GB)
+#   - module load gcc/13.2 ONLY — NOT nvhpc (CUDA.jl artifact-shadow bug); strip
+#     hpc_sdk from LD_LIBRARY_PATH
+#   - JULIA_DEPOT_PATH + a manually-installed Julia under /nobackup/$USER
+#
+# NOTE — run_sn50_fiducial.jl has NO restart wiring (save/load_checkpoint exist
+# in src/ but the driver does not call them), so the whole t_end run must finish
+# inside ONE walltime.  PROBE FIRST to size it:
+#     qsub -q devel -l walltime=00:45:00 -v T_END=2,DT_SNAP=2 scripts/run_relax_optimal.pbs
+#   read Mcell/s + wall_sec from the tail of the log, extrapolate to t_end=20,
+#   and confirm it fits 24 h before the full submit below.  If it does not,
+#   wire --restart/--checkpoint-every into the driver (the grmhd auto-resubmit
+#   pattern) rather than just bumping walltime.
+#
+# Full run:
+#     qsub scripts/run_relax_optimal.pbs                 # NX=384, t_end=20
+#     qsub -v NX=512 scripts/run_relax_optimal.pbs
+#
+set -e
+cd "${PBS_O_WORKDIR:-/nobackup/$USER/Binary-Supernova}"
+mkdir -p logs
+
+# --- toolchain (gcc only; keep nvhpc OFF so CUDA.jl uses its own artifacts) ---
+if [[ -r /usr/share/Modules/init/bash ]]; then source /usr/share/Modules/init/bash; fi
+module purge >/dev/null 2>&1 || true
+module load gcc/13.2
+export LD_LIBRARY_PATH="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v hpc_sdk | paste -sd: -)"
+unset JULIA_CUDA_USE_BINARYBUILDER
+export JULIA_DEPOT_PATH="/nobackup/$USER/.julia:"
+export PATH=/nobackup/$USER/julia-1.12.5/bin:$PATH    # EDIT — match the julia you installed
+
+# --- physics + numerics (the "relax-optimal" config; mirrors run_relax_optimal.sh) ---
+M_BH1_MSUN=15
+M_STAR_MSUN=30
+M_BH2_MSUN=20             # ΔM = 10 M☉, ΔM/M_preSN = 0.22 (Blaauw-safe)
+A0_RSUN=2.5              # tight orbit → strong tidal distortion
+L=6.0                    # ±6 a₀ box — holds widened binary + R>2 r_sep CBD region
+E_SN_FRAC=0.05
+BOMB_MASS_FRAC=0.5
+V_KICK_Y=-0.015
+SINK_DELAY=5.0
+RHO_FLOOR=3e-4
+P_FLOOR=1e-5
+
+# --- env-overridable knobs (defaults = full production run) ---
+NX=${NX:-384}
+T_END=${T_END:-20.0}
+DT_SNAP=${DT_SNAP:-0.5}
+RELAX_T_MAX=${RELAX_T_MAX:-3.0}
+
+TAG="relax_optimal_a${A0_RSUN/./}rsun_L${L%.*}_bh${M_BH1_MSUN}_${M_BH2_MSUN}_esn${E_SN_FRAC/./}_bombmf${BOMB_MASS_FRAC/./}_kick${V_KICK_Y/-/m}_nx${NX}"
+OUTDIR=${OUTDIR:-demo1/output_${TAG}}
+mkdir -p "$OUTDIR"
+
+echo "=========================================================="
+echo "[$(date -Is)] relax-optimal A100 run on $(hostname)"
+echo "  NX=$NX  L=$L  a₀=$A0_RSUN R☉  t_end=$T_END  relax_t_max=$RELAX_T_MAX"
+echo "  OUTDIR=$OUTDIR"
+echo "=========================================================="
+nvidia-smi -L || true
+
+echo ">> precompile…"
+julia --project=. -e 'using BinarySupernova; import CUDA; @assert CUDA.functional()' \
+  || { echo ">>> precompile/CUDA FAILED — aborting"; exit 1; }
+
+echo ">> run…"
+julia --project=. -t 16 scripts/run_sn50_fiducial.jl \
+    --m-bh1-msun  "$M_BH1_MSUN" \
+    --m-star-msun "$M_STAR_MSUN" \
+    --m-bh2-msun  "$M_BH2_MSUN" \
+    --a0-rsun     "$A0_RSUN" \
+    --L           "$L" \
+    --relax-ic \
+    --relax-t-max "$RELAX_T_MAX" \
+    --self-gravity --torque-free \
+    --e-sn-frac      "$E_SN_FRAC" \
+    --bomb-mass-frac "$BOMB_MASS_FRAC" \
+    --v-kick-y       "$V_KICK_Y" \
+    --bh2-sink-delay "$SINK_DELAY" \
+    --rho-floor "$RHO_FLOOR" \
+    --p-floor   "$P_FLOOR" \
+    --nx     "$NX" \
+    --t-end  "$T_END" \
+    --dt-snap "$DT_SNAP" \
+    --outdir "$OUTDIR" \
+    --gpu
+RC=$?
+echo "[$(date -Is)] run exited rc=$RC"
+
+if [[ $RC -eq 0 ]]; then
+  echo ">> analyze (CBD diagnostics)…"
+  julia --project=. scripts/plot_sn50_cbd.jl "$OUTDIR" \
+    || echo ">>> analyze failed — re-run scripts/plot_sn50_cbd.jl manually"
+fi
+ls -la "$OUTDIR" | grep -E '\.png|\.h5|\.csv' || true
+exit $RC
