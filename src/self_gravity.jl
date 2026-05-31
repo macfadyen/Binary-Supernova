@@ -54,11 +54,17 @@ function solve_poisson_isolated(ρ::AbstractArray{Float64,3},
         K_cpu[i,j,k] = -1.0 / sqrt(r2 + ε²)
     end
 
-    backend = KA.get_backend(ρ)
-    K = adapt(backend, K_cpu)
+    # Move the kernel to ρ's device via `similar` + `copyto!` (host→device copy
+    # on GPU; plain copy on CPU).  NOT `adapt(KA.get_backend(ρ), K_cpu)`: a KA
+    # backend is not an Adapt adaptor, so adapt(::CUDABackend, ::Array) hits the
+    # identity fallback and leaves K on the HOST — then fft(K) .* fft(ρ_pad)
+    # mixes a host array with a cuFFT (device) array and crashes.
+    K = similar(ρ, Nx, Ny, Nz)
+    copyto!(K, K_cpu)
 
     # Zero-pad density onto the same device.
-    ρ_pad = KA.zeros(backend, Float64, Nx, Ny, Nz)
+    ρ_pad = similar(ρ, Nx, Ny, Nz)
+    fill!(ρ_pad, 0.0)
     ρ_pad[1:nx, 1:ny, 1:nz] .= ρ
 
     # Discrete convolution via FFT.
