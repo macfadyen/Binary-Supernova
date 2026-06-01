@@ -141,8 +141,8 @@ fi
 # rc=0 → reached t_end: run CBD diagnostics.
 if [[ $RC -eq 0 ]]; then
   echo ">> analyze (CBD diagnostics)…"
-  julia --project=. scripts/plot_sn50_cbd.jl "$OUTDIR" \
-    || echo ">>> analyze failed — re-run scripts/plot_sn50_cbd.jl manually"
+  julia --project=. scripts/plot_sn50_cbd.jl --outdir "$OUTDIR" \
+    || echo ">>> analyze failed — re-run: julia --project=. scripts/plot_sn50_cbd.jl --outdir $OUTDIR"
 fi
 ls -la "$OUTDIR" | grep -E '\.png|\.h5|\.csv' || true
 exit $RC
