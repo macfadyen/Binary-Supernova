@@ -39,6 +39,11 @@
 #     qsub scripts/run_relax_optimal.pbs                 # NX=384, t_end=20
 #     qsub -v NX=512 scripts/run_relax_optimal.pbs
 #
+# Confirming grid for the CBD negative-result paper (overflow + bound-mass +
+# resolution + integration-time levers — see docs/cbd_grid_runbook.md).  A0_RSUN
+# and E_SN_FRAC are env-overridable grid axes (defaults = the G0 decisive run):
+#     qsub -v NX=256,A0_RSUN=2.0,E_SN_FRAC=0.02,T_END=30 scripts/run_relax_optimal.pbs
+#
 set -e
 cd "${PBS_O_WORKDIR:-/nobackup/$USER/Binary-Supernova}"
 mkdir -p logs
@@ -56,9 +61,9 @@ export PATH=/nobackup/$USER/julia-1.12.5/bin:$PATH    # EDIT — match the julia
 M_BH1_MSUN=15
 M_STAR_MSUN=30
 M_BH2_MSUN=20             # ΔM = 10 M☉, ΔM/M_preSN = 0.22 (Blaauw-safe)
-A0_RSUN=2.5              # tight orbit → strong tidal distortion
+A0_RSUN=${A0_RSUN:-2.5}              # tight orbit → strong tidal distortion
 L=6.0                    # ±6 a₀ box — holds widened binary + R>2 r_sep CBD region
-E_SN_FRAC=0.05
+E_SN_FRAC=${E_SN_FRAC:-0.05}
 BOMB_MASS_FRAC=0.5
 V_KICK_Y=-0.015
 SINK_DELAY=5.0
@@ -133,7 +138,7 @@ echo "[$(date -Is)] run exited rc=$RC"
 if [[ $RC -eq 2 ]]; then
   echo "[$(date -Is)] wall-budget exit — auto-resubmitting to continue from checkpoint"
   cd "${PBS_O_WORKDIR:-$(pwd)}"
-  qsub -v NX="$NX",T_END="$T_END",DT_SNAP="$DT_SNAP",RELAX_T_MAX="$RELAX_T_MAX",CHECKPOINT_EVERY_MIN="$CHECKPOINT_EVERY_MIN",WALL_BUDGET_MIN="$WALL_BUDGET_MIN",OUTDIR="$OUTDIR" \
+  qsub -v NX="$NX",T_END="$T_END",DT_SNAP="$DT_SNAP",RELAX_T_MAX="$RELAX_T_MAX",A0_RSUN="$A0_RSUN",E_SN_FRAC="$E_SN_FRAC",CHECKPOINT_EVERY_MIN="$CHECKPOINT_EVERY_MIN",WALL_BUDGET_MIN="$WALL_BUDGET_MIN",OUTDIR="$OUTDIR" \
        scripts/run_relax_optimal.pbs
   exit 0   # this job's part is done; the chained job carries on
 fi
