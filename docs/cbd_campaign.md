@@ -126,4 +126,42 @@ walltime cap, though at NX=256 (~6 h) it finishes in one job.
   for a quantitative result.
 - **Single point in parameter space:** tighter a₀ (deeper Roche overflow), weaker
   E_SN (more bound fallback), or a genuine pre-existing circumbinary reservoir
-  remain the only routes to a CBD that this campaign has not excluded.
+  remain the only routes to a CBD that this campaign has not excluded. (A fourth
+  lever — tuning the natal kick to shrink the orbit — is excluded analytically;
+  see §7.)
+
+## 7. The kick lever — checked, and it can't make a CBD
+
+A natural follow-up: rather than inject more angular momentum, *tighten the
+binary* so the fixed spin-fed mini-disc (radius `r_circ`) becomes circumbinary.
+`r_circ` is set by the pre-SN star, so a post-SN kick that shrinks the separation
+`a_post` lowers the cavity bar `2·a_post` **without touching `r_circ`** — a real
+decoupling the static spin-cap scan can't see. `scripts/predict_disk.jl
+--scan-kick` (figure from `scripts/plot_cbd_kick.jl`) solves the Blaauw
+mass-loss + kick orbit and re-tests the disc fate at `a_post`. Two walls close
+the route:
+
+1. **Energetics.** An instantaneous kick at separation a₀ can shrink the
+   semi-major axis to at most **a₀/2**, and only by zeroing the relative velocity
+   — which drives periastron → 0, a head-on BH–BH plunge. Mass loss pushes the
+   other way (it widens). A bound, *surviving* binary therefore stays near
+   `a_post ≳ a₀`.
+2. **Geometry.** Even at that unreachable floor the cavity edge `2·a_post` never
+   falls to `r_circ`. For the CBD-optimal config `r_circ = 0.46 a₀` (fixed) while
+   a settled CBD needs `a_post ≤ 0.23 a₀` — sub-stellar-radius, i.e. a contact
+   configuration, not a binary.
+
+![kick lever](figures/cbd_campaign_kick.png)
+
+Sweeping the anti-orbital kick `k_y` (figure): as the kick grows the orbit
+tightens, but periastron crosses the collision radius (`r_peri < R★`) at
+`k_y ≈ 0.33` (~620 km/s) and the pair **merges** before the cavity edge ever
+reaches `r_circ`. The `r_circ`/cavity ratio peaks at **0.33 ≪ 1** on the last
+non-merging orbit. The only thing the kick buys on the way is a stronger
+BH2-lobe overflow — a more vigorous **L2 spill (CBD seed)** in the
+`k_y ≈ 0.08–0.33` window — never a settled disc.
+
+So the kick is **not** a fourth CBD route: it lands the system in L2-spill or in
+a BH–BH merger. This is consistent with the spin-cap theorem — the obstruction is
+the *separation-independent* ratio of spin AM to orbital AM, which a kick cannot
+change.
