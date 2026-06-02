@@ -26,10 +26,18 @@
 #   r_circ(a₀) = (Ω_spin/Ω_brk)² (M_star/M_BH2) (R_star/a₀)   ∝ 1/a₀,
 # and one SCF solve covers a whole a₀ scan.
 #
+# A natal kick on BH2 (Blaauw mass loss + --v-kick-*) reshapes the post-SN
+# orbit; the kick modes solve that orbit and re-test the disc fate at the new
+# separation a_post (r_circ stays fixed — set by the pre-SN star — while the
+# cavity bar 2·a_post moves).  A kick can shrink a_post to at most a0/2, and
+# only by driving r_peri -> 0 (a BH-BH plunge); mass loss alone widens.
+#
 # Usage:
 #   julia --project=. scripts/predict_disk.jl [run_sn50_fiducial.jl flags]
 #   julia --project=. scripts/predict_disk.jl [flags] --scan-a0  LO,HI,N
 #   julia --project=. scripts/predict_disk.jl [flags] --scan-alpha LO,HI,N
+#   julia --project=. scripts/predict_disk.jl [flags] --v-kick-y K [--v-kick-x/-z K]
+#   julia --project=. scripts/predict_disk.jl [flags] --scan-kick LO,HI,N  # sweep ky
 #
 # Examples:
 #   julia --project=. scripts/predict_disk.jl                       # fiducial
@@ -101,6 +109,67 @@ function bisect(f, lo::Float64, hi::Float64; tol = 1e-4)
     end
     return 0.5 * (lo + hi)
 end
+
+# ---------------------------------------------------------------------------
+# Post-SN orbit:  Blaauw mass loss + natal kick on BH2.
+#
+# Pre-SN the binary is BH1 + star on a circular orbit of separation a₀ and
+# relative speed v_orb = √(G M_pre / a₀) with M_pre = M_BH1 + M_star = 1 (code
+# units).  At the explosion (CLAUDE.md §7.2) the star → BH2 (mass M_BH2) +
+# ejecta, the ejecta is removed instantaneously (Blaauw), and a natal kick is
+# added to BH2.  The post-SN *relative* orbit is governed by M_bin = M_BH1 +
+# M_BH2.  Work in run_sn50_fiducial.jl's frame (l.407-410): the BH2−BH1
+# separation is along −x, the pre-SN relative velocity along −y, the orbital AM
+# along +z.  The kick V_KICK is added to BH2, so it adds straight to the
+# relative velocity, and the components keep the run's exact meaning:
+#   kx ≡ --v-kick-x   along x  (kx>0 points toward BH1 — radially inward)
+#   ky ≡ --v-kick-y   along y  (ky>0 OPPOSES the −y orbital motion — anti-
+#                               orbital / retrograde → shrinks the orbit)
+#   kz ≡ --v-kick-z   along z  (out of plane)
+# All in code units (velocity unit = v_orb).  Because the tool reproduces the
+# run frame, run --v-kick-* values can be pasted verbatim and mean the same.
+#
+# Two-body invariants of the relative orbit (G = 1):
+#   ε = ½|v_rel|² − M_bin/|r_rel|         specific energy   → a = −M_bin/(2ε)
+#   h = |r_rel × v_rel|                   specific AM       → e = √(1 + 2ε h²/M_bin²)
+# Mass loss alone (k = 0) keeps |r_rel| = a₀ as the periastron and pushes
+# apastron out; it unbinds the binary when M_ejecta/M_pre > ½ (Blaauw).
+function post_sn_orbit(M_BH1, M_BH2, M_pre, kx, ky, kz; a0 = 1.0)
+    M_bin = M_BH1 + M_BH2
+    v_orb = sqrt(M_pre / a0)
+    rx, ry, rz = -a0, 0.0, 0.0                          # BH2 − BH1, along −x
+    vx, vy, vz = kx, -v_orb + ky, kz                    # v_rel_pre along −y, + kick
+    v2 = vx^2 + vy^2 + vz^2
+    ε  = 0.5 * v2 - M_bin / a0                          # specific orbital energy
+    hx = ry*vz - rz*vy;  hy = rz*vx - rx*vz;  hz = rx*vy - ry*vx
+    h2 = hx^2 + hy^2 + hz^2
+    bound  = ε < 0.0
+    a_post = bound ? -M_bin / (2ε) : Inf
+    e      = sqrt(max(1.0 + 2.0 * ε * h2 / M_bin^2, 0.0))
+    r_peri = bound ? a_post * (1.0 - e) : NaN
+    r_apo  = bound ? a_post * (1.0 + e) : NaN
+    return (; M_bin, v_orb, ε, h2, bound, a_post, e, r_peri, r_apo)
+end
+
+# Disc fate at the POST-SN separation a_post, with r_circ held fixed (the kick
+# moves the BHs but not the spin-fed mini-disc, whose size is set by the pre-SN
+# star).  Roche lobe and cavity edge both scale with the separation a_post.
+function disc_fate_post(r_circ, a_post, b)
+    RL  = b.RL_bh2     * a_post                         # eggleton fraction × a_post
+    tr  = b.trunc_fac  * RL
+    cav = b.cavity_fac * a_post                         # tidal cavity edge ~ 2 a_post
+    r_circ <  tr  ? "mini-disc around BH2"  :
+    r_circ <  RL  ? "mini-disc (stripped)"  :
+    r_circ <  cav ? "overflows BH2 lobe (L2 spill)" :
+                    "CIRCUMBINARY DISC"
+end
+
+# v_orb in km/s (code velocity unit = orbital speed) for sanity vs real kicks.
+const _G_CGS   = 6.674e-8
+const _MSUN_G  = 1.989e33
+const _RSUN_CM = 6.957e10
+vorb_kms(M_TOT_MSUN, a0_rsun) =
+    sqrt(_G_CGS * M_TOT_MSUN * _MSUN_G / (a0_rsun * _RSUN_CM)) / 1e5
 
 # ---------------------------------------------------------------------------
 # Stellar rotation figure — dimensionless, solved ONCE (independent of a₀).
@@ -466,6 +535,133 @@ function scan_alpha(α_lo, α_hi, n, n_poly; a0_rsun, bp...)
 end
 
 # ---------------------------------------------------------------------------
+# Kick fate: classify a post-SN orbit (disruption / merger / disc class).
+
+function kick_classify(o, r_circ, b, coll)
+    o.bound          || return "DISRUPTED (unbound)"
+    o.r_peri < coll  && return "BH-BH MERGER (plunge)"
+    r_circ <= 0.0    && return "RADIAL ACCRETION (no disc)"
+    return uppercase(disc_fate_post(r_circ, o.a_post, b))
+end
+
+# ---------------------------------------------------------------------------
+# Single-kick report: post-SN orbit + whether it clears the CBD bar.
+
+function kick_report(b, fig, kx, ky, kz, coll)
+    M_pre = b.M_BH1 + b.M_STAR
+    o     = post_sn_orbit(b.M_BH1, b.M_BH2, M_pre, kx, ky, kz)
+    vk    = vorb_kms(b.M_TOT_MSUN, b.a0_rsun)
+    kmag  = sqrt(kx^2 + ky^2 + kz^2)
+    f_ej  = b.M_EJ / M_pre
+
+    println()
+    println("="^72)
+    println("  POST-SN KICK ORBIT + DISC FATE     predict_disk.jl --v-kick-*")
+    println("="^72)
+    println("  IC: ", fig.label)
+    isempty(fig.note) || println("  WARN: ", fig.note)
+    println()
+    @printf("KICK  [run frame; code velocity unit = v_orb = %.0f km/s]\n", vk)
+    @printf("  kx --v-kick-x = %+.3f  (%+.0f km/s)   radial%s\n", kx, kx*vk,
+            kx > 0 ? " (toward BH1)" : kx < 0 ? " (away from BH1)" : "")
+    @printf("  ky --v-kick-y = %+.3f  (%+.0f km/s)   %s\n", ky, ky*vk,
+            ky > 0 ? "anti-orbital -> SHRINKS" : ky < 0 ? "prograde -> widens" : "tangential")
+    @printf("  kz --v-kick-z = %+.3f  (%+.0f km/s)   out-of-plane\n", kz, kz*vk)
+    @printf("  |v_kick| = %.3f  (%.0f km/s)\n", kmag, kmag*vk)
+    println()
+
+    @printf("BLAAUW MASS LOSS\n")
+    @printf("  M_ejecta/M_pre = %.3f   %s\n", f_ej,
+            f_ej > 0.5 ? "** > 0.5: UNBINDS on mass loss alone" : "<= 0.5 (mass loss alone keeps it bound)")
+    println()
+
+    @printf("POST-SN ORBIT  [a0 = pre-SN separation = 1]\n")
+    if !o.bound
+        @printf("  UNBOUND: specific energy = %+.4f > 0  -> binary disrupted\n", o.ε)
+    else
+        @printf("  a_post = %.4f a0 = %.4f R_sun   (%s vs a0)\n",
+                o.a_post, o.a_post * b.a0_rsun, o.a_post < 1 ? "SHRUNK" : "widened")
+        @printf("  e_post = %.4f\n", o.e)
+        @printf("  r_peri = %.4f a0 = %.4f R_sun = %.2f R_star   %s\n",
+                o.r_peri, o.r_peri * b.a0_rsun, o.r_peri / b.R_STAR,
+                o.r_peri < coll ? "** < collision radius" : "")
+        @printf("  r_apo  = %.4f a0 = %.4f R_sun\n", o.r_apo, o.r_apo * b.a0_rsun)
+    end
+    println()
+
+    @printf("CBD BAR  [r_circ fixed by the pre-SN star; cavity edge = %.1f a_post]\n", b.cavity_fac)
+    @printf("  r_circ              = %.4f a0 = %.4f R_sun\n", b.r_circ, b.r_circ * b.a0_rsun)
+    if o.bound
+        cav = b.cavity_fac * o.a_post
+        @printf("  cavity edge (2a)    = %.4f a0 = %.4f R_sun\n", cav, cav * b.a0_rsun)
+        @printf("  r_circ / cavity     = %.3f   %s\n", b.r_circ / cav,
+                b.r_circ >= cav ? ">= 1: CLEARS the bar (CBD)" : "< 1: below the bar (no settled CBD)")
+        @printf("  CBD needs a_post <= r_circ/%.1f = %.4f a0\n", b.cavity_fac, b.r_circ / b.cavity_fac)
+    end
+    println()
+
+    println("-"^72)
+    println("  VERDICT:  ", kick_classify(o, b.r_circ, b, coll))
+    println("-"^72)
+    println()
+    return o
+end
+
+# ---------------------------------------------------------------------------
+# Scan the anti-orbital (tangential) kick — the orbit-shrinking lever.
+
+function scan_kick(b, fig, lo, hi, n, kx, kz, coll)
+    M_pre = b.M_BH1 + b.M_STAR
+    vk    = vorb_kms(b.M_TOT_MSUN, b.a0_rsun)
+    a_cbd = b.r_circ / b.cavity_fac                     # a_post below which a CBD clears
+    println()
+    println("="^72)
+    println("  POST-SN KICK SCAN (tangential)    predict_disk.jl --scan-kick")
+    println("="^72)
+    println("  IC: ", fig.label)
+    isempty(fig.note) || println("  WARN: ", fig.note)
+    @printf("  fixed: kx=%.2f  kz=%.2f   v_orb=%.0f km/s   M_ej/M_pre=%.3f\n",
+            kx, kz, vk, b.M_EJ / M_pre)
+    @printf("  r_circ=%.4f a0 (fixed);  settled CBD needs a_post <= %.4f a0;  coll r_peri<%.3f a0\n",
+            b.r_circ, a_cbd, coll)
+    println("  (ky>0 = anti-orbital/retrograde = orbit-shrinking; ky<0 = prograde)")
+    println()
+    @printf("  %8s %9s  %6s  %9s  %7s  %9s   %s\n",
+            "ky", "ky[km/s]", "bound", "a_post", "e", "r_peri", "fate")
+    a_min = Inf;  ky_min = NaN
+    for i in 0:n-1
+        ky = lo + (hi - lo) * i / max(n - 1, 1)
+        o  = post_sn_orbit(b.M_BH1, b.M_BH2, M_pre, kx, ky, kz)
+        if o.bound && o.r_peri >= coll && o.a_post < a_min
+            a_min = o.a_post;  ky_min = ky
+        end
+        @printf("  %8.3f %9.0f  %6s  %9.4f  %7.4f  %9.4f   %s\n",
+                ky, ky * vk, o.bound ? "yes" : "NO",
+                o.a_post, o.e, o.r_peri, kick_classify(o, b.r_circ, b, coll))
+    end
+    println()
+    println("-"^72)
+    if isfinite(a_min)
+        @printf("  tightest bound, non-merging orbit: a_post = %.4f a0  (ky = %.3f)\n", a_min, ky_min)
+        cav = b.cavity_fac * a_min
+        if b.r_circ >= cav
+            @printf("  -> cavity edge %.4f a0 <= r_circ %.4f a0: a CBD CLEARS here.\n", cav, b.r_circ)
+        else
+            @printf("  -> cavity edge %.4f a0 still > r_circ %.4f a0: NO settled CBD.\n", cav, b.r_circ)
+            @printf("     would need a_post <= %.4f a0; tighter only via r_peri -> 0\n", a_cbd)
+            println("     (a near-radial plunge = BH-BH merger, not a tightened binary).")
+        end
+    else
+        println("  -> no bound, non-merging orbit in the scanned ky range.")
+    end
+    @printf("  [floor: an instantaneous kick at a0 can shrink a_post to at most a0/2,\n")
+    println("   and only at r_peri -> 0 (collision).  Mass loss pushes the other way.]")
+    println("-"^72)
+    println()
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 
 function main()
     m_bh1_msun  = arg_float("--m-bh1-msun",  50.0)
@@ -484,6 +680,11 @@ function main()
     trunc_fac   = arg_float("--trunc-factor",  0.4)     # mini-disc edge / R_L,BH2
     scan_a0_s   = arg_str(  "--scan-a0",    "")
     scan_α_s    = arg_str(  "--scan-alpha", "")
+    kx          = arg_float("--v-kick-x", 0.0)          # radial (run frame)
+    ky          = arg_float("--v-kick-y", 0.0)          # tangential; >0 = anti-orbital
+    kz          = arg_float("--v-kick-z", 0.0)          # out-of-plane
+    scan_kick_s = arg_str(  "--scan-kick", "")          # sweep ky: LO,HI[,N]
+    coll_arg    = arg_float("--coll-radius", -1.0)      # code units; <0 -> default R_STAR
 
     R_star_rsun = 1.0                                   # hardcoded in run_sn50_fiducial.jl
     n_poly      = 1.0 / (4.0/3.0 - 1.0)                 # γ = 4/3 -> n = 3
@@ -501,10 +702,20 @@ function main()
         lo, hi, n = parse_scan(scan_a0_s)
         fig = rotation_figure(; scf_ic, α_request, no_spin, spin_frac, n_poly)
         scan_a0(fig, lo, hi, n; bp...)
+    elseif !isempty(scan_kick_s)
+        lo, hi, n = parse_scan(scan_kick_s)
+        fig  = rotation_figure(; scf_ic, α_request, no_spin, spin_frac, n_poly)
+        b    = budget(a0_rsun, fig; bp...)
+        coll = coll_arg >= 0 ? coll_arg : b.R_STAR
+        scan_kick(b, fig, lo, hi, n, kx, kz, coll)
     else
         fig = rotation_figure(; scf_ic, α_request, no_spin, spin_frac, n_poly)
         b   = budget(a0_rsun, fig; bp...)
         print_report(b, fig)
+        if kx != 0.0 || ky != 0.0 || kz != 0.0           # kick given: add orbit report
+            coll = coll_arg >= 0 ? coll_arg : b.R_STAR
+            kick_report(b, fig, kx, ky, kz, coll)
+        end
     end
     return nothing
 end
