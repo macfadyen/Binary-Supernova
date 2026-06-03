@@ -101,7 +101,10 @@ do_status() {
     echo "== qstat (this user) =="
     qstat -u "${USER:-$(id -un)}" 2>/dev/null || echo "  (qstat unavailable — not on a PBS host?)"
     echo
-    echo "== grid output dirs (diagnostics rows / checkpoint present) =="
+    echo "== grid output dirs (diag rows / checkpoint / completion) =="
+    echo "   verdict: DONE = done.marker present (finished cleanly, no relaunch);"
+    echo "            RESUME = checkpoint but no done.marker (wall-budget truncated);"
+    echo "            re-run = dir exists but no checkpoint (stub/empty — start fresh)."
     local spec name d
     for spec in "G0 256 2.5 0.05" "G1 256 2.5 0.02" "G2 256 2.0 0.05" \
                 "G4 256 2.0 0.02" "G5 384 2.5 0.05"; do
@@ -109,17 +112,31 @@ do_status() {
         set -- $spec
         name="$1"; d="$(outdir_for "$2" "$3" "$4")"
         if [ -d "$d" ]; then
-            local rows="-" chk="no"
+            local rows="-" chk="no" done_="no" verdict
             [ -f "$d/diagnostics.csv" ] && rows="$(wc -l < "$d/diagnostics.csv" | tr -d ' ')"
-            [ -f "$d/chkpt.h5" ] && chk="yes"
-            printf "  %-3s %-78s diag=%s chkpt=%s\n" "$name" "$d" "$rows" "$chk"
+            [ -f "$d/chkpt.h5" ]    && chk="yes"
+            [ -f "$d/done.marker" ] && done_="yes"
+            # A finished run has done.marker (run_sn50_fiducial.jl writes it at t_end);
+            # chkpt.h5 alone can't tell "finished" from "wall-budget truncated".
+            if   [ "$done_" = "yes" ]; then verdict="DONE"
+            elif [ "$chk"   = "yes" ]; then verdict="RESUME (mid-flight)"
+            else                            verdict="re-run (no chkpt)"
+            fi
+            printf "  %-3s %-78s diag=%-6s chkpt=%-3s done=%-3s %s\n" \
+                   "$name" "$d" "$rows" "$chk" "$done_" "$verdict"
         else
             printf "  %-3s %-78s [not started]\n" "$name" "$d"
         fi
     done
-    # G3 lives in G0's dir (continuation) or its own dir
+    # G3 lives in G0's dir (continuation) or its own fresh dir; report its
+    # completion the same way so the verdict column is consistent.
     local g3="demo1/output_G3_t50_nx256"
-    [ -d "$g3" ] && printf "  %-3s %-78s %s\n" "G3" "$g3" "(fresh)"
+    if [ -d "$g3" ]; then
+        local g3v="re-run (no chkpt)"
+        [ -f "$g3/chkpt.h5" ]    && g3v="RESUME (mid-flight)"
+        [ -f "$g3/done.marker" ] && g3v="DONE"
+        printf "  %-3s %-78s (fresh) %s\n" "G3" "$g3" "$g3v"
+    fi
 }
 
 # ---- arg parse -------------------------------------------------------------
